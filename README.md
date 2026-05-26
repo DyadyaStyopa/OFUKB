@@ -57,19 +57,51 @@ python3 pq_excel_gui.py
 
 ## Упаковка без терминала/IDE
 
-Для macOS практичный первый вариант - собрать `.app` через PyInstaller:
+### macOS: сборка `.app`
+
+PyInstaller собирает приложение `.app`, а не установщик `.pkg`.
 
 ```bash
-pyinstaller --windowed --onedir --add-data "OFUKB_CBR_PQ_alt_parser.py:." pq_excel_gui.py
+python3 -m pip install pandas requests beautifulsoup4 lxml pyinstaller
+python3 -m PyInstaller --windowed --onedir --name "OFUKB CBR PQ" --add-data "OFUKB_CBR_PQ_alt_parser.py:." pq_excel_gui.py
 ```
 
-Для Windows практичный первый вариант - собрать `.exe` через PyInstaller:
+После сборки открывать нужно файл:
+
+```text
+dist/OFUKB CBR PQ.app
+```
+
+Проверка из терминала:
 
 ```bash
-pyinstaller --noconsole --onedir --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
+open "dist/OFUKB CBR PQ.app"
 ```
 
-Для распространения пользователям обычно удобнее `--onedir`, потому что зависимости `pandas`, `lxml`, `requests` и файлы Tcl/Tk для GUI проще диагностировать в распакованной папке. Для Windows поверх собранной папки можно сделать установщик через Inno Setup или NSIS. Для macOS при распространении вне своего компьютера потребуется подпись приложения, а для публичной доставки - notarization.
+Если появляется файл `pq_excel_gui.pkg`, это не результат команды PyInstaller из этой инструкции. Такой `.pkg` не нужно открывать: macOS пытается открыть его как установщик, но это невалидный installer package.
+
+Если нужен именно установщик `.pkg`, сначала соберите `.app`, а затем сделайте package отдельной командой:
+
+```bash
+productbuild --component "dist/OFUKB CBR PQ.app" /Applications "dist/OFUKB CBR PQ.pkg"
+```
+
+Для распространения `.app` или `.pkg` другим пользователям macOS может потребоваться подпись приложения, а для публичной доставки - notarization.
+
+### Windows: сборка `.exe`
+
+```bash
+python -m pip install pandas requests beautifulsoup4 lxml pyinstaller
+python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
+```
+
+Результат будет в папке:
+
+```text
+dist\OFUKB CBR PQ\OFUKB CBR PQ.exe
+```
+
+Для распространения пользователям обычно удобнее `--onedir`, потому что зависимости `pandas`, `lxml`, `requests` и файлы Tcl/Tk для GUI проще диагностировать в распакованной папке. Поверх собранной папки можно сделать установщик через Inno Setup или NSIS.
 
 ## Быстрый запуск
 
