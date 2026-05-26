@@ -200,6 +200,23 @@ xl/workbook.xml
 
 После сохранения скрипт проверяет ZIP/XML структуру `.xlsx` и дополнительно проверяет, что служебные части остались byte-for-byte такими же, как в исходном файле. Если это условие нарушено, выполнение завершается ошибкой.
 
+
+## Добавление новых Power Query запросов
+
+Скрипт может сработать с дополнительными Power Query запросами, если они добавлены в `test.xlsx` или в книгу с очень похожей внутренней структурой.
+
+Новые запросы с высокой вероятностью будут обработаны, если:
+
+- запрос загружается на лист Excel как таблица, а не остается только connection-only;
+- M-код хранится в DataMashup внутри `customXml/item*.xml`;
+- запрос использует уже поддержанные операции Power Query: `Web.Page`, `Web.Contents`, `Web.BrowserContents`, `Html.Table`, `Table.PromoteHeaders`, `Table.TransformColumnTypes`, `Table.ReplaceErrorValues`, `Table.RemoveColumns`, `Table.RenameColumns`, `Table.Skip`, `Table.NestedJoin`, `Table.ExpandTableColumn`, `Table.ReorderColumns`, `Table.TransformColumns`;
+- HTML-страницы имеют структуру таблиц, похожую на уже используемые страницы ЦБ;
+- выходная Excel-таблица уже создана в книге и связана с Power Query/queryTable.
+
+Новый запрос, скорее всего, потребует доработки backend-скрипта, если он использует другие M-функции, например `Table.SelectRows`, `Table.AddColumn`, `Table.Group`, `Table.Combine`, `Table.Unpivot`, `Excel.CurrentWorkbook`, `Csv.Document`, работу с JSON/XML/API, пользовательские M-функции, параметры или сложные вложенные `let`-выражения.
+
+Важно: скрипт не является универсальным Power Query runtime. Он реализует Python-исполнитель конкретного семейства запросов из текущей книги. Также безопасная запись не создает новые Excel-таблицы с нуля и не меняет `xl/tables` / `xl/queryTables`; она рассчитана на обновление данных в уже существующих таблицах книги.
+
 ## Типичный сценарий работы
 
 1. Открыть терминал в корне репозитория.
