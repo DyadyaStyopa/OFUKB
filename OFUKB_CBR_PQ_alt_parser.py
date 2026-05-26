@@ -15,15 +15,15 @@ Python-копия загрузки Power Query из книги Excel.
     pip install pandas requests beautifulsoup4 lxml
 
 Запуск:
-    python wtf2_xmlsafe_cellonly.py "ОФУКБ_АО_ТБанк_2026_вер 2.xlsx"
+    python OFUKB_CBR_PQ_alt_parser.py "ОФУКБ_АО_ТБанк_2026_вер 2.xlsx"
 
 Выбор банка по регистрационному номеру ЦБ:
-    python wtf2_xmlsafe_cellonly.py "...xlsx" --regnum 1481
+    python OFUKB_CBR_PQ_alt_parser.py "...xlsx" --regnum 1481
 
 Полезные режимы:
-    python wtf2_xmlsafe_cellonly.py "...xlsx" --list       # только показать найденные загрузки
-    python wtf2_xmlsafe_cellonly.py "...xlsx" --dump-m     # сохранить извлечённый M-код рядом с файлом
-    python wtf2_xmlsafe_cellonly.py "...xlsx" --no-cache   # не использовать HTML-кэш
+    python OFUKB_CBR_PQ_alt_parser.py "...xlsx" --list       # только показать найденные загрузки
+    python OFUKB_CBR_PQ_alt_parser.py "...xlsx" --dump-m     # сохранить извлечённый M-код рядом с файлом
+    python OFUKB_CBR_PQ_alt_parser.py "...xlsx" --no-cache   # не использовать HTML-кэш
 
 Ограничение: это не полноценный интерпретатор M, а реализация именно того набора
 операций, который обнаружен в этой книге: Web.Page/Web.Contents, Web.BrowserContents,
@@ -2070,13 +2070,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info("Загружаемый запрос готов: %s -> %s", item.query_name, df_debug_summary(df))
         print(f"  строк: {len(df)}, столбцов: {len(df.columns)}")
 
+    final_output_path = output_path
+    temp_output_path = output_path.with_name(f"{output_path.stem}.tmp{output_path.suffix or '.xlsx'}")
     try:
-        write_dataframe_to_excel_table(xlsx_path, output_path, loaded, results, logger=logger, debug_dir=debug_dir)
+        if temp_output_path.exists():
+            temp_output_path.unlink()
+        write_dataframe_to_excel_table(xlsx_path, temp_output_path, loaded, results, logger=logger, debug_dir=debug_dir)
+        os.replace(temp_output_path, final_output_path)
+        logger.info("Атомарная замена временного файла на итоговый: %s", final_output_path)
     except Exception:
         logger.error("Ошибка при записи/валидации Excel-файла")
         logger.error(traceback.format_exc())
         raise
-    print(f"Готово: {output_path}")
+    print(f"Готово: {final_output_path}")
     if log_path is not None:
         print(f"Лог выполнения: {log_path}")
     if debug_dir is not None:

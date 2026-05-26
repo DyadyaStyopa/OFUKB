@@ -6,8 +6,9 @@
 
 ## Что лежит в репозитории
 
-- `wtf2_xmlsafe_cellonly.py` - основной Python-скрипт. Выполняет Power Query запросы, скачивает или читает HTML-страницы ЦБ из кэша, собирает таблицы через `pandas` и записывает результат в `.xlsx` через ZIP/XML.
+- `OFUKB_CBR_PQ_alt_parser.py` - основной Python-скрипт. Выполняет Power Query запросы, скачивает или читает HTML-страницы ЦБ из кэша, собирает таблицы через `pandas` и записывает результат в `.xlsx` через ZIP/XML.
 - `test.xlsx` - тестовая Excel-книга с Power Query запросами. Скрипт ориентирован именно на структуру этой книги.
+- `pq_excel_gui.py` - графическая оболочка для запуска парсера без терминала.
 - `README.md` - эта инструкция.
 
 ## Что делает скрипт
@@ -32,12 +33,41 @@ pip install pandas requests beautifulsoup4 lxml openpyxl
 
 `openpyxl` нужен в основном для проверки, что итоговая книга открывается как Excel-файл. Запись `.xlsx` сам скрипт делает напрямую через ZIP/XML.
 
+
+## Графический запуск
+
+Для запуска через окно используйте GUI:
+
+```bash
+python3 pq_excel_gui.py
+```
+
+В окне можно выбрать `test.xlsx`, указать `regnum`, путь выходного файла, папку HTML-кэша, лог и debug-папку. GUI запускает backend в отдельном процессе и показывает вывод выполнения в окне.
+
+Текущая архитектура GUI рассчитана на будущую упаковку в приложение: backend вызывается как Python-модуль, а не как отдельная команда через внешний интерпретатор Python.
+
+## Упаковка без терминала/IDE
+
+Для macOS практичный первый вариант - собрать `.app` через PyInstaller:
+
+```bash
+pyinstaller --windowed --onedir --add-data "OFUKB_CBR_PQ_alt_parser.py:." pq_excel_gui.py
+```
+
+Для Windows практичный первый вариант - собрать `.exe` через PyInstaller:
+
+```bash
+pyinstaller --noconsole --onedir --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
+```
+
+Для распространения пользователям обычно удобнее `--onedir`, потому что зависимости `pandas`, `lxml`, `requests` и файлы Tcl/Tk для GUI проще диагностировать в распакованной папке. Для Windows поверх собранной папки можно сделать установщик через Inno Setup или NSIS. Для macOS при распространении вне своего компьютера потребуется подпись приложения, а для публичной доставки - notarization.
+
 ## Быстрый запуск
 
 Из корня репозитория:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000
 ```
 
 После выполнения появится файл:
@@ -49,7 +79,7 @@ test_regnum_1000_python_filled.xlsx
 `1000` - регистрационный номер банка. Его можно заменить на другой номер:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1481
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1481
 ```
 
 Тогда результат будет сохранен как:
@@ -63,7 +93,7 @@ test_regnum_1481_python_filled.xlsx
 Если не передавать `--regnum`, скрипт использует регистрационный номер, который уже прописан в M-коде книги:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx
 ```
 
 Результат:
@@ -77,7 +107,7 @@ test_python_filled.xlsx
 Можно указать путь для результата через `-o` или `--output`:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 -o result.xlsx
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 -o result.xlsx
 ```
 
 ## Просмотр найденных запросов
@@ -85,7 +115,7 @@ python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 -o result.xlsx
 Чтобы только посмотреть, какие Power Query запросы будут выполнены и куда они загружаются:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --list
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --list
 ```
 
 Этот режим не создает новый `.xlsx`.
@@ -95,7 +125,7 @@ python3 wtf2_xmlsafe_cellonly.py test.xlsx --list
 Чтобы выгрузить M-код из книги в отдельный файл:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --dump-m
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --dump-m
 ```
 
 Будет создан файл рядом с книгой:
@@ -117,13 +147,13 @@ pq_html_cache
 Можно указать другую папку кэша:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 --cache-dir path/to/cache
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --cache-dir path/to/cache
 ```
 
 Чтобы игнорировать кэш и скачать HTML заново:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 --no-cache
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --no-cache
 ```
 
 ## Логи и debug
@@ -131,19 +161,19 @@ python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 --no-cache
 Подробный лог в консоль и файл:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 --verbose
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --verbose
 ```
 
 Указать конкретный файл лога:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 --verbose --log-file run.log
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --verbose --log-file run.log
 ```
 
 Максимальная диагностика:
 
 ```bash
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 --debug
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --debug
 ```
 
 В debug-режиме скрипт сохраняет промежуточные CSV/JSON-снимки шагов Power Query и диагностический отчет по XML/ZIP структуре итоговой книги.
@@ -182,5 +212,5 @@ xl/workbook.xml
 
 ```bash
 pip install pandas requests beautifulsoup4 lxml openpyxl
-python3 wtf2_xmlsafe_cellonly.py test.xlsx --regnum 1000 --verbose
+python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --verbose
 ```

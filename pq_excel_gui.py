@@ -1,46 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Графическая оболочка для wtf2_xmlsafe_cellonly.py.
+Графическая оболочка для OFUKB_CBR_PQ_alt_parser.py.
 
-Что делает GUI:
-- позволяет выбрать исходный Excel-файл;
-- позволяет указать regnum банка;
-- позволяет выбрать выходной файл, кэш, лог и debug-папку;
-- запускает основной скрипт в отдельном процессе;
-- показывает весь вывод скрипта в окне;
-- позволяет остановить выполнение и открыть готовый файл.
-
-Зависимости GUI: только стандартная библиотека Python.
-Основной backend-скрипт по-прежнему требует свои зависимости:
-    pip install pandas requests beautifulsoup4 lxml
-
-Рекомендуемое размещение:
-    pq_excel_gui.py
-    wtf2_xmlsafe_cellonly.py
-
-в одной папке.
+GUI запускает backend как импортируемый Python-модуль в отдельном процессе.
+Это удобнее для упаковки в .app/.exe: пользователю не нужен терминал, IDE или
+отдельный выбор Python-интерпретатора.
 """
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
 import json
+import multiprocessing as mp
 import os
 import queue
 import re
 import shlex
 import subprocess
 import sys
-import threading
 import time
+import traceback
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 APP_TITLE = "Заполнение Excel из данных ЦБ"
+BACKEND_FILENAME = "OFUKB_CBR_PQ_alt_parser.py"
 SETTINGS_FILE = Path.home() / ".pq_excel_gui_settings.json"
+PROCESS_DONE = "__PROCESS_DONE__"
 
 
 # -----------------------------------------------------------------------------
@@ -48,7 +39,12 @@ SETTINGS_FILE = Path.home() / ".pq_excel_gui_settings.json"
 # -----------------------------------------------------------------------------
 
 def app_dir() -> Path:
-    """Папка, где лежит GUI-скрипт."""
+    """Папка, где лежит GUI-скрипт или распакованные ресурсы приложения."""
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if bundle_dir:
+        return Path(bundle_dir).resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     try:
         return Path(__file__).resolve().parent
     except NameError:
@@ -56,21 +52,18 @@ def app_dir() -> Path:
 
 
 def find_backend_script() -> Optional[Path]:
-    """Пытается найти основной скрипт рядом с GUI."""
+    """Пытается найти backend рядом с GUI."""
     folder = app_dir()
-    exact = folder / "wtf2_xmlsafe_cellonly.py"
+    exact = folder / BACKEND_FILENAME
     if exact.exists():
         return exact
 
     candidates = sorted(
-        folder.glob("wtf2_xmlsafe_cellonly*.py"),
+        folder.glob("OFUKB_CBR_PQ_alt_parser*.py"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    for candidate in candidates:
-        if candidate.resolve() != Path(__file__).resolve():
-            return candidate
-    return None
+    return candidates[0] if candidates else None
 
 
 def quote_command(args: List[str]) -> str:
@@ -112,8 +105,54 @@ def save_settings(data: Dict[str, str]) -> None:
     try:
         SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
-        # Настройки — необязательная удобная функция, поэтому не мешаем основной работе.
+        # Настройки необязательны, не мешаем основной работе.
         pass
+
+
+class QueueTextWriter:
+    """Минимальный file-like writer, отправляющий stdout/stderr в multiprocessing.Queue."""
+
+    def __init__(self, out_queue: mp.Queue):
+        self.out_queue = out_queue
+
+    def write(self, text: str) -> int:
+        if text:
+            self.out_queue.put(text)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+def run_backend_worker(backend_path: str, backend_args: List[str], cwd: str, out_queue: mp.Queue) -> None:
+    """Запускается в дочернем процессе и вызывает backend.main(argv)."""
+    writer = QueueTextWriter(out_queue)
+    code = 1
+    try:
+        os.chdir(cwd)
+        backend = Path(backend_path).expanduser().resolve()
+        sys.path.insert(0, str(backend.parent))
+        spec = importlib.util.spec_from_file_location("ofukb_cbr_pq_alt_parser_backend", backend)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Не удалось загрузить backend-модуль: {backend}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        if not hasattr(module, "main"):
+            raise RuntimeError(f"В backend-модуле нет функции main(argv): {backend}")
+
+        with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+            result = module.main(backend_args)
+        code = int(result or 0)
+    except SystemExit as exc:
+        code = int(exc.code or 0) if isinstance(exc.code, int) else 1
+    except BaseException:
+        out_queue.put("\n[Ошибка GUI при запуске backend]\n")
+        out_queue.put(traceback.format_exc())
+        code = 1
+    finally:
+        out_queue.put(f"\n[Процесс завершён с кодом {code}]\n")
+        out_queue.put({"type": PROCESS_DONE, "code": code})
 
 
 # -----------------------------------------------------------------------------
@@ -127,10 +166,10 @@ class PowerQueryExcelGUI(tk.Tk):
         self.geometry("1060x760")
         self.minsize(900, 640)
 
-        self.proc: Optional[subprocess.Popen[str]] = None
-        self.reader_thread: Optional[threading.Thread] = None
-        self.output_queue: queue.Queue[str] = queue.Queue()
+        self.proc: Optional[mp.Process] = None
+        self.output_queue: Optional[mp.Queue] = None
         self.start_time: Optional[float] = None
+        self.last_return_code: Optional[int] = None
 
         self.settings = load_settings()
 
@@ -139,7 +178,6 @@ class PowerQueryExcelGUI(tk.Tk):
             found = find_backend_script()
             backend = str(found) if found else ""
 
-        self.var_python = tk.StringVar(value=self.settings.get("python", sys.executable))
         self.var_backend = tk.StringVar(value=backend)
         self.var_xlsx = tk.StringVar(value=self.settings.get("xlsx", ""))
         self.var_regnum = tk.StringVar(value=self.settings.get("regnum", ""))
@@ -147,6 +185,10 @@ class PowerQueryExcelGUI(tk.Tk):
         self.var_cache_dir = tk.StringVar(value=self.settings.get("cache_dir", ""))
         self.var_log_file = tk.StringVar(value=self.settings.get("log_file", ""))
         self.var_debug_dir = tk.StringVar(value=self.settings.get("debug_dir", ""))
+
+        if self.var_xlsx.get() and not self.var_output.get():
+            self.var_output.set(default_output_path(self.var_xlsx.get(), self.var_regnum.get()))
+        self._last_regnum = self.var_regnum.get()
 
         self.var_verbose = tk.BooleanVar(value=self.settings.get("verbose", "1") == "1")
         self.var_debug = tk.BooleanVar(value=self.settings.get("debug", "0") == "1")
@@ -177,8 +219,7 @@ class PowerQueryExcelGUI(tk.Tk):
         reg_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         reg_frame.columnconfigure(1, weight=1)
         ttk.Label(reg_frame, text="regnum банка:").grid(row=0, column=0, sticky="w")
-        reg_entry = ttk.Entry(reg_frame, textvariable=self.var_regnum, width=16)
-        reg_entry.grid(row=0, column=1, sticky="w", padx=(8, 6))
+        ttk.Entry(reg_frame, textvariable=self.var_regnum, width=16).grid(row=0, column=1, sticky="w", padx=(8, 6))
         ttk.Button(reg_frame, text="Авто-путь выхода", command=self.set_auto_output).grid(row=0, column=2, padx=(0, 6))
         ttk.Label(
             reg_frame,
@@ -199,13 +240,12 @@ class PowerQueryExcelGUI(tk.Tk):
         advanced = ttk.LabelFrame(top, text="Дополнительные пути", padding=10)
         advanced.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         advanced.columnconfigure(1, weight=1)
-        self._add_path_row(advanced, 0, "Python:", self.var_python, self.choose_python, "Выбрать Python")
-        self._add_path_row(advanced, 1, "Backend-скрипт:", self.var_backend, self.choose_backend, "Выбрать скрипт")
-        self._add_path_row(advanced, 2, "Папка кэша:", self.var_cache_dir, self.choose_cache_dir, "Выбрать папку")
-        self._add_path_row(advanced, 3, "Файл лога:", self.var_log_file, self.choose_log_file, "Выбрать файл")
-        self._add_path_row(advanced, 4, "Debug-папка:", self.var_debug_dir, self.choose_debug_dir, "Выбрать папку")
+        self._add_path_row(advanced, 0, "Backend-скрипт:", self.var_backend, self.choose_backend, "Выбрать скрипт")
+        self._add_path_row(advanced, 1, "Папка кэша:", self.var_cache_dir, self.choose_cache_dir, "Выбрать папку")
+        self._add_path_row(advanced, 2, "Файл лога:", self.var_log_file, self.choose_log_file, "Выбрать файл")
+        self._add_path_row(advanced, 3, "Debug-папка:", self.var_debug_dir, self.choose_debug_dir, "Выбрать папку")
 
-        command_frame = ttk.LabelFrame(self, text="Команда", padding=10)
+        command_frame = ttk.LabelFrame(self, text="Эквивалентная команда", padding=10)
         command_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
         command_frame.columnconfigure(0, weight=1)
         self.command_text = tk.Text(command_frame, height=2, wrap="word", font=("Menlo", 11))
@@ -247,10 +287,8 @@ class PowerQueryExcelGUI(tk.Tk):
 
     def _bind_events(self) -> None:
         variables = [
-            self.var_python,
             self.var_backend,
             self.var_xlsx,
-            self.var_regnum,
             self.var_output,
             self.var_cache_dir,
             self.var_log_file,
@@ -258,15 +296,33 @@ class PowerQueryExcelGUI(tk.Tk):
         ]
         for var in variables:
             var.trace_add("write", lambda *_: self.update_command_preview())
+        self.var_regnum.trace_add("write", lambda *_: self._on_regnum_changed())
         for var in [self.var_verbose, self.var_debug, self.var_no_cache, self.var_dump_m, self.var_list_only]:
             var.trace_add("write", lambda *_: self.update_command_preview())
+
+    def _on_regnum_changed(self) -> None:
+        old_regnum = getattr(self, "_last_regnum", "")
+        new_regnum = self.var_regnum.get().strip()
+        xlsx = self.var_xlsx.get().strip()
+        output = self.var_output.get().strip()
+        old_auto_output = default_output_path(xlsx, old_regnum) if xlsx else ""
+        if xlsx and (not output or output == old_auto_output):
+            self.var_output.set(default_output_path(xlsx, new_regnum))
+        self._last_regnum = new_regnum
+        self.update_command_preview()
 
     # ------------------------------------------------------------------
     # Выбор файлов/папок
     # ------------------------------------------------------------------
 
     def choose_xlsx(self) -> None:
-        initialdir = str(Path(self.var_xlsx.get()).expanduser().parent) if self.var_xlsx.get() else str(Path.home())
+        old_xlsx = self.var_xlsx.get().strip()
+        old_regnum = self.var_regnum.get().strip()
+        old_output = self.var_output.get().strip()
+        old_auto_output = default_output_path(old_xlsx, old_regnum) if old_xlsx else ""
+        output_was_auto = not old_output or old_output == old_auto_output
+
+        initialdir = str(Path(old_xlsx).expanduser().parent) if old_xlsx else str(Path.home())
         path = filedialog.askopenfilename(
             title="Выберите исходный Excel-файл",
             initialdir=initialdir,
@@ -274,7 +330,7 @@ class PowerQueryExcelGUI(tk.Tk):
         )
         if path:
             self.var_xlsx.set(path)
-            if not self.var_output.get():
+            if output_was_auto:
                 self.set_auto_output()
 
     def choose_output(self) -> None:
@@ -288,15 +344,10 @@ class PowerQueryExcelGUI(tk.Tk):
         if path:
             self.var_output.set(path)
 
-    def choose_python(self) -> None:
-        path = filedialog.askopenfilename(title="Выберите интерпретатор Python", initialdir=str(Path(sys.executable).parent))
-        if path:
-            self.var_python.set(path)
-
     def choose_backend(self) -> None:
         initialdir = str(app_dir())
         path = filedialog.askopenfilename(
-            title="Выберите backend-скрипт wtf2_xmlsafe_cellonly.py",
+            title=f"Выберите backend-скрипт {BACKEND_FILENAME}",
             initialdir=initialdir,
             filetypes=[("Python files", "*.py"), ("All files", "*.*")],
         )
@@ -326,11 +377,9 @@ class PowerQueryExcelGUI(tk.Tk):
     # Команда и валидация
     # ------------------------------------------------------------------
 
-    def build_command(self) -> List[str]:
-        python_exe = self.var_python.get().strip() or sys.executable
-        backend = self.var_backend.get().strip()
+    def build_backend_args(self) -> List[str]:
         xlsx = self.var_xlsx.get().strip()
-        args = [python_exe, backend, xlsx]
+        args = [xlsx]
 
         output = self.var_output.get().strip()
         if output and not self.var_list_only.get():
@@ -363,17 +412,17 @@ class PowerQueryExcelGUI(tk.Tk):
 
         return args
 
+    def build_display_command(self) -> List[str]:
+        backend = self.var_backend.get().strip() or BACKEND_FILENAME
+        return [sys.executable, backend] + self.build_backend_args()
+
     def validate_inputs(self) -> bool:
-        python_exe = Path(self.var_python.get().strip() or sys.executable).expanduser()
         backend = Path(self.var_backend.get().strip()).expanduser()
         xlsx = Path(self.var_xlsx.get().strip()).expanduser()
         regnum = self.var_regnum.get().strip()
 
-        if not python_exe.exists():
-            messagebox.showerror("Ошибка", f"Не найден Python:\n{python_exe}")
-            return False
         if not backend.exists():
-            messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{backend}\n\nПоложите GUI рядом с wtf2_xmlsafe_cellonly.py или выберите скрипт вручную.")
+            messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{backend}\n\nПоложите GUI рядом с {BACKEND_FILENAME} или выберите скрипт вручную.")
             return False
         if not xlsx.exists():
             messagebox.showerror("Ошибка", f"Не найден Excel-файл:\n{xlsx}")
@@ -387,7 +436,7 @@ class PowerQueryExcelGUI(tk.Tk):
         return True
 
     def update_command_preview(self) -> None:
-        command = quote_command(self.build_command())
+        command = quote_command(self.build_display_command())
         self.command_text.configure(state="normal")
         self.command_text.delete("1.0", "end")
         self.command_text.insert("1.0", command)
@@ -397,7 +446,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.var_output.set(default_output_path(self.var_xlsx.get().strip(), self.var_regnum.get().strip()))
 
     def copy_command(self) -> None:
-        command = quote_command(self.build_command())
+        command = quote_command(self.build_display_command())
         self.clipboard_clear()
         self.clipboard_append(command)
         self.status.set("Команда скопирована")
@@ -415,28 +464,24 @@ class PowerQueryExcelGUI(tk.Tk):
 
         self.save_current_settings()
         self.clear_log()
-        args = self.build_command()
-        self.append_log("Команда:\n" + quote_command(args) + "\n\n")
+        backend_args = self.build_backend_args()
+        self.append_log("Эквивалентная команда:\n" + quote_command(self.build_display_command()) + "\n\n")
 
-        env = os.environ.copy()
-        env.setdefault("PYTHONIOENCODING", "utf-8")
-        env.setdefault("PYTHONUTF8", "1")
+        backend_path = str(Path(self.var_backend.get()).expanduser().resolve())
+        cwd = str(Path(self.var_xlsx.get()).expanduser().parent)
+        self.output_queue = mp.Queue()
+        self.last_return_code = None
 
         try:
-            self.proc = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                env=env,
-                cwd=str(Path(self.var_xlsx.get()).expanduser().parent),
+            self.proc = mp.Process(
+                target=run_backend_worker,
+                args=(backend_path, backend_args, cwd, self.output_queue),
+                daemon=True,
             )
+            self.proc.start()
         except Exception as exc:
             self.proc = None
+            self.output_queue = None
             messagebox.showerror("Не удалось запустить", str(exc))
             return
 
@@ -446,35 +491,34 @@ class PowerQueryExcelGUI(tk.Tk):
         self.progress.start(12)
         self.status.set("Выполняется...")
 
-        self.reader_thread = threading.Thread(target=self._reader_worker, daemon=True)
-        self.reader_thread.start()
-
-    def _reader_worker(self) -> None:
-        assert self.proc is not None
-        assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            self.output_queue.put(line)
-        return_code = self.proc.wait()
-        self.output_queue.put(f"\n[Процесс завершён с кодом {return_code}]\n")
-        self.output_queue.put("__PROCESS_DONE__")
-
     def _poll_process_output(self) -> None:
-        try:
-            while True:
-                item = self.output_queue.get_nowait()
-                if item == "__PROCESS_DONE__":
-                    self._on_process_done()
-                else:
-                    self.append_log(item)
-        except queue.Empty:
-            pass
+        if self.output_queue is not None:
+            try:
+                while True:
+                    item = self.output_queue.get_nowait()
+                    if isinstance(item, dict) and item.get("type") == PROCESS_DONE:
+                        self.last_return_code = int(item.get("code", 1))
+                        self._on_process_done()
+                    else:
+                        self.append_log(str(item))
+            except queue.Empty:
+                pass
+
+        if self.proc is not None and not self.proc.is_alive() and self.last_return_code is None:
+            self.last_return_code = self.proc.exitcode
+            self.append_log(f"\n[Процесс завершён с кодом {self.last_return_code}]\n")
+            self._on_process_done()
+
         self.after(100, self._poll_process_output)
 
     def _on_process_done(self) -> None:
-        code = self.proc.returncode if self.proc is not None else None
+        if self.proc is None:
+            return
+        code = self.last_return_code if self.last_return_code is not None else self.proc.exitcode
         elapsed = int(time.time() - self.start_time) if self.start_time else 0
+        self.proc.join(timeout=0.2)
         self.proc = None
-        self.reader_thread = None
+        self.output_queue = None
         self.start_time = None
         self.btn_run.configure(state="normal")
         self.btn_stop.configure(state="disabled")
@@ -486,11 +530,15 @@ class PowerQueryExcelGUI(tk.Tk):
         else:
             self.status.set(f"Ошибка. Код завершения: {code}")
             messagebox.showerror("Ошибка", "Скрипт завершился с ошибкой. Подробности смотри в логе.")
+        self.last_return_code = None
 
     def stop_script(self) -> None:
         if self.proc is None:
             return
-        if not messagebox.askyesno("Остановить", "Остановить выполнение скрипта?"):
+        if not messagebox.askyesno(
+            "Остановить",
+            "Остановить выполнение скрипта?\n\nОсновной выходной файл защищён атомарной записью, но временный .tmp.xlsx может остаться рядом с ним.",
+        ):
             return
         try:
             self.proc.terminate()
@@ -523,7 +571,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.status.set(f"Лог сохранён: {path}")
 
     def open_output(self) -> None:
-        path = self.var_output.get().strip()
+        path = self.var_output.get().strip() or default_output_path(self.var_xlsx.get().strip(), self.var_regnum.get().strip())
         if not path:
             messagebox.showwarning("Нет пути", "Сначала укажите выходной файл.")
             return
@@ -547,7 +595,6 @@ class PowerQueryExcelGUI(tk.Tk):
 
     def save_current_settings(self) -> None:
         data = {
-            "python": self.var_python.get(),
             "backend_script": self.var_backend.get(),
             "xlsx": self.var_xlsx.get(),
             "regnum": self.var_regnum.get(),
@@ -579,6 +626,7 @@ class PowerQueryExcelGUI(tk.Tk):
 # -----------------------------------------------------------------------------
 
 def main() -> int:
+    mp.freeze_support()
     root = PowerQueryExcelGUI()
     root.mainloop()
     return 0
