@@ -25,13 +25,22 @@
 
 ## Требования
 
-Нужен Python 3 и зависимости:
+Нужен Python 3. Обязательные Python-зависимости для backend-скрипта:
 
 ```bash
-pip install pandas requests beautifulsoup4 lxml openpyxl
+pip install pandas requests beautifulsoup4 lxml
 ```
 
-`openpyxl` нужен в основном для проверки, что итоговая книга открывается как Excel-файл. Запись `.xlsx` сам скрипт делает напрямую через ZIP/XML.
+Для графического интерфейса используется `tkinter`. На macOS и Windows он обычно входит в стандартную установку Python. На Linux может потребоваться системный пакет, например `python3-tk`.
+
+Опциональные зависимости:
+
+```bash
+pip install openpyxl pyinstaller
+```
+
+- `openpyxl` можно использовать для дополнительной ручной проверки, что итоговая книга открывается как Excel-файл. Сам скрипт записывает `.xlsx` напрямую через ZIP/XML и не требует `openpyxl` для основной работы.
+- `pyinstaller` нужен только для сборки GUI в `.app` или `.exe`; для обычного запуска из Python он не требуется.
 
 
 ## Графический запуск
@@ -228,6 +237,6 @@ xl/workbook.xml
 Пример:
 
 ```bash
-pip install pandas requests beautifulsoup4 lxml openpyxl
+pip install pandas requests beautifulsoup4 lxml
 python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --verbose
 ```
