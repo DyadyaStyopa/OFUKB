@@ -9,6 +9,7 @@
 - `OFUKB_CBR_PQ_alt_parser.py` - основной Python-скрипт. Выполняет Power Query запросы, скачивает или читает HTML-страницы ЦБ из кэша, собирает таблицы через `pandas` и записывает результат в `.xlsx` через ZIP/XML.
 - `test.xlsx` - тестовая Excel-книга с Power Query запросами. Скрипт ориентирован именно на структуру этой книги.
 - `pq_excel_gui.py` - графическая оболочка для запуска парсера без терминала.
+- `assets/app_icon.icns` и `assets/app_icon.ico` - иконки приложения для сборки macOS `.app` и Windows `.exe`.
 - `README.md` - эта инструкция.
 
 ## Что делает скрипт
@@ -63,7 +64,7 @@ PyInstaller собирает приложение `.app`, а не установ
 
 ```bash
 python3 -m pip install pandas requests beautifulsoup4 lxml pyinstaller
-python3 -m PyInstaller --windowed --onedir --name "OFUKB CBR PQ" --add-data "OFUKB_CBR_PQ_alt_parser.py:." pq_excel_gui.py
+python3 -m PyInstaller --windowed --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.icns --add-data "OFUKB_CBR_PQ_alt_parser.py:." pq_excel_gui.py
 ```
 
 После сборки открывать нужно файл:
@@ -92,7 +93,7 @@ productbuild --component "dist/OFUKB CBR PQ.app" /Applications "dist/OFUKB CBR P
 
 ```bash
 python -m pip install pandas requests beautifulsoup4 lxml pyinstaller
-python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
+python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.ico --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
 ```
 
 Результат будет в папке:
