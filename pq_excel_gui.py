@@ -66,6 +66,20 @@ def find_backend_script() -> Optional[Path]:
     return candidates[0] if candidates else None
 
 
+def resolve_backend_script(value: str) -> Optional[Path]:
+    """Возвращает реальный путь backend, не требуя показывать absolute path в GUI."""
+    raw = value.strip()
+    if not raw or raw == BACKEND_FILENAME:
+        return find_backend_script()
+    candidate = Path(raw).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+    local = app_dir() / raw
+    if local.exists():
+        return local.resolve()
+    return None
+
+
 def quote_command(args: List[str]) -> str:
     """Красиво экранирует команду для отображения/копирования."""
     return " ".join(shlex.quote(str(a)) for a in args)
@@ -173,21 +187,16 @@ class PowerQueryExcelGUI(tk.Tk):
 
         self.settings = load_settings()
 
-        backend = self.settings.get("backend_script")
-        if not backend:
-            found = find_backend_script()
-            backend = str(found) if found else ""
-
-        self.var_backend = tk.StringVar(value=backend)
-        self.var_xlsx = tk.StringVar(value=self.settings.get("xlsx", ""))
+        # Не подставляем сохранённые абсолютные пути при старте: окно не должно
+        # показывать файловую систему пользователя до явного выбора файлов.
+        self.var_backend = tk.StringVar(value=BACKEND_FILENAME)
+        self.var_xlsx = tk.StringVar(value="")
         self.var_regnum = tk.StringVar(value=self.settings.get("regnum", ""))
-        self.var_output = tk.StringVar(value=self.settings.get("output", ""))
-        self.var_cache_dir = tk.StringVar(value=self.settings.get("cache_dir", ""))
-        self.var_log_file = tk.StringVar(value=self.settings.get("log_file", ""))
-        self.var_debug_dir = tk.StringVar(value=self.settings.get("debug_dir", ""))
+        self.var_output = tk.StringVar(value="")
+        self.var_cache_dir = tk.StringVar(value="")
+        self.var_log_file = tk.StringVar(value="")
+        self.var_debug_dir = tk.StringVar(value="")
 
-        if self.var_xlsx.get() and not self.var_output.get():
-            self.var_output.set(default_output_path(self.var_xlsx.get(), self.var_regnum.get()))
         self._last_regnum = self.var_regnum.get()
 
         self.var_verbose = tk.BooleanVar(value=self.settings.get("verbose", "1") == "1")
@@ -414,15 +423,15 @@ class PowerQueryExcelGUI(tk.Tk):
 
     def build_display_command(self) -> List[str]:
         backend = self.var_backend.get().strip() or BACKEND_FILENAME
-        return [sys.executable, backend] + self.build_backend_args()
+        return ["python3", backend] + self.build_backend_args()
 
     def validate_inputs(self) -> bool:
-        backend = Path(self.var_backend.get().strip()).expanduser()
+        backend = resolve_backend_script(self.var_backend.get())
         xlsx = Path(self.var_xlsx.get().strip()).expanduser()
         regnum = self.var_regnum.get().strip()
 
-        if not backend.exists():
-            messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{backend}\n\nПоложите GUI рядом с {BACKEND_FILENAME} или выберите скрипт вручную.")
+        if backend is None:
+            messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{self.var_backend.get().strip() or BACKEND_FILENAME}\n\nПоложите GUI рядом с {BACKEND_FILENAME} или выберите скрипт вручную.")
             return False
         if not xlsx.exists():
             messagebox.showerror("Ошибка", f"Не найден Excel-файл:\n{xlsx}")
@@ -467,7 +476,11 @@ class PowerQueryExcelGUI(tk.Tk):
         backend_args = self.build_backend_args()
         self.append_log("Эквивалентная команда:\n" + quote_command(self.build_display_command()) + "\n\n")
 
-        backend_path = str(Path(self.var_backend.get()).expanduser().resolve())
+        backend = resolve_backend_script(self.var_backend.get())
+        if backend is None:
+            messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{self.var_backend.get().strip() or BACKEND_FILENAME}")
+            return
+        backend_path = str(backend)
         cwd = str(Path(self.var_xlsx.get()).expanduser().parent)
         self.output_queue = mp.Queue()
         self.last_return_code = None
@@ -595,13 +608,9 @@ class PowerQueryExcelGUI(tk.Tk):
 
     def save_current_settings(self) -> None:
         data = {
-            "backend_script": self.var_backend.get(),
-            "xlsx": self.var_xlsx.get(),
+            # Сохраняем только непутьевые настройки, чтобы GUI не показывал
+            # личные абсолютные пути пользователя при следующем запуске.
             "regnum": self.var_regnum.get(),
-            "output": self.var_output.get(),
-            "cache_dir": self.var_cache_dir.get(),
-            "log_file": self.var_log_file.get(),
-            "debug_dir": self.var_debug_dir.get(),
             "verbose": "1" if self.var_verbose.get() else "0",
             "debug": "1" if self.var_debug.get() else "0",
             "no_cache": "1" if self.var_no_cache.get() else "0",
