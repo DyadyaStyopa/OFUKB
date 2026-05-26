@@ -104,6 +104,26 @@ dist\OFUKB CBR PQ\OFUKB CBR PQ.exe
 
 Для распространения пользователям обычно удобнее `--onedir`, потому что зависимости `pandas`, `lxml`, `requests` и файлы Tcl/Tk для GUI проще диагностировать в распакованной папке. Поверх собранной папки можно сделать установщик через Inno Setup или NSIS.
 
+### GitHub Release
+
+В репозитории есть GitHub Actions workflow, который автоматически собирает:
+
+- macOS `.app` в архив `OFUKB-CBR-PQ-macOS.zip`;
+- Windows `.exe` в архив `OFUKB-CBR-PQ-Windows.zip`.
+
+Чтобы создать новый Release, поставьте тег версии и отправьте его на GitHub:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+После push тега GitHub Actions соберет оба архива и прикрепит их к GitHub Release.
+
+Для ручного запуска без тега можно открыть вкладку `Actions` на GitHub, выбрать workflow `Build Release` и нажать `Run workflow`. В этом случае будет создан release с техническим тегом вида `manual-123`.
+
+Сборки не подписаны. На macOS возможны предупреждения Gatekeeper, на Windows - предупреждения SmartScreen.
+
 ## Быстрый запуск
 
 Из корня репозитория:

@@ -1,0 +1,111 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS app
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pandas requests beautifulsoup4 lxml pyinstaller
+
+      - name: Build app
+        run: |
+          python3 -m PyInstaller \
+            --windowed \
+            --onedir \
+            --name "OFUKB CBR PQ" \
+            --icon assets/app_icon.icns \
+            --add-data "OFUKB_CBR_PQ_alt_parser.py:." \
+            pq_excel_gui.py
+
+      - name: Archive app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "dist/OFUKB CBR PQ.app" "OFUKB-CBR-PQ-macOS.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OFUKB-CBR-PQ-macOS
+          path: OFUKB-CBR-PQ-macOS.zip
+
+  build-windows:
+    name: Build Windows exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests beautifulsoup4 lxml pyinstaller
+
+      - name: Build exe
+        run: |
+          python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.ico --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
+
+      - name: Archive exe
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\OFUKB CBR PQ" -DestinationPath "OFUKB-CBR-PQ-Windows.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OFUKB-CBR-PQ-Windows
+          path: OFUKB-CBR-PQ-Windows.zip
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-macos
+      - build-windows
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
+        run: |
+          ls -la release-assets
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" release-assets/*.zip --clobber
+          else
+            gh release create "$TAG_NAME" release-assets/*.zip \
+              --title "$TAG_NAME" \
+              --notes "Автоматическая сборка GUI-приложения для macOS и Windows."
+          fi
