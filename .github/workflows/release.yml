@@ -11,32 +11,16 @@ permissions:
 
 jobs:
   build-macos:
-    name: Build macOS app
+    name: Build native macOS app
     runs-on: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+      - name: Build native SwiftUI app
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pandas requests beautifulsoup4 lxml pyinstaller
-
-      - name: Build app
-        run: |
-          python3 -m PyInstaller \
-            --windowed \
-            --onedir \
-            --name "OFUKB CBR PQ" \
-            --icon assets/app_icon.icns \
-            --add-data "OFUKB_CBR_PQ_alt_parser.py:." \
-            pq_excel_gui.py
+          ./script/build_and_run.sh --build-only
 
       - name: Archive app
         run: |

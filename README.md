@@ -56,15 +56,44 @@ python3 pq_excel_gui.py
 
 Текущая архитектура GUI рассчитана на будущую упаковку в приложение: backend вызывается как Python-модуль, а не как отдельная команда через внешний интерпретатор Python.
 
+## Нативное macOS-приложение
+
+В репозитории также есть новая SwiftUI-оболочка для macOS в папке `Sources/OFUKBMacGUI`. Она использует тот же backend `OFUKB_CBR_PQ_alt_parser.py`, но выглядит как обычное macOS-приложение: выбор Excel-файла через Finder-панель или drag-and-drop, отдельные блоки для `regnum`, результата, режимов запуска и лога.
+
+Собрать и открыть приложение локально:
+
+```bash
+./script/build_and_run.sh
+```
+
+Проверить сборку и запуск процесса:
+
+```bash
+./script/build_and_run.sh --verify
+```
+
+Собрать `.app` без открытия окна:
+
+```bash
+./script/build_and_run.sh --build-only
+```
+
+После сборки приложение лежит здесь:
+
+```text
+dist/OFUKB CBR PQ.app
+```
+
+Важно: macOS-приложение всё равно требует доступный `python3` и Python-зависимости из `requirements.txt`, потому что бизнес-логика остается в Python backend.
+
 ## Упаковка без терминала/IDE
 
 ### macOS: сборка `.app`
 
-PyInstaller собирает приложение `.app`, а не установщик `.pkg`.
+Для macOS основной вариант - нативная SwiftUI-оболочка:
 
 ```bash
-python3 -m pip install pandas requests beautifulsoup4 lxml pyinstaller
-python3 -m PyInstaller --windowed --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.icns --add-data "OFUKB_CBR_PQ_alt_parser.py:." pq_excel_gui.py
+./script/build_and_run.sh --build-only
 ```
 
 После сборки открывать нужно файл:
@@ -79,7 +108,7 @@ dist/OFUKB CBR PQ.app
 open "dist/OFUKB CBR PQ.app"
 ```
 
-Если появляется файл `pq_excel_gui.pkg`, это не результат команды PyInstaller из этой инструкции. Такой `.pkg` не нужно открывать: macOS пытается открыть его как установщик, но это невалидный installer package.
+Внутрь `.app` копируются SwiftUI GUI, `OFUKB_CBR_PQ_alt_parser.py`, `requirements.txt` и иконки. Python и зависимости из `requirements.txt` должны быть установлены на компьютере, где запускается приложение.
 
 Если нужен именно установщик `.pkg`, сначала соберите `.app`, а затем сделайте package отдельной командой:
 
