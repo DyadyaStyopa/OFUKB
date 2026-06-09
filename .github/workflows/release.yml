@@ -86,7 +86,7 @@ jobs:
         run: |
           ls -la release-assets
           RELEASE_DATE="$(date -u +'%Y-%m-%d')"
-          RELEASE_TAG="release-${RELEASE_DATE}"
+          RELEASE_TAG="release-${RELEASE_DATE}-${GITHUB_RUN_NUMBER}"
           RELEASE_TITLE="${RELEASE_DATE}"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE"
