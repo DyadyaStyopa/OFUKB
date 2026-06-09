@@ -3,13 +3,12 @@ import UniformTypeIdentifiers
 
 struct WorkbookSection: View {
     @EnvironmentObject private var appState: AppState
-    @State private var isDropTargeted = false
 
     var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 14) {
-                FileDropZone(isTargeted: isDropTargeted)
-                    .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+                FileDropZone(isTargeted: false)
+                    .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                         handleDrop(providers)
                     }
 

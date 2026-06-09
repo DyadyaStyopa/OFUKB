@@ -2,10 +2,9 @@ import SwiftUI
 
 struct AdvancedPathsSection: View {
     @EnvironmentObject private var appState: AppState
-    @State private var isExpanded = false
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
+        DisclosureGroup {
             VStack(alignment: .leading, spacing: 12) {
                 PathField(
                     title: "HTML-кэш",

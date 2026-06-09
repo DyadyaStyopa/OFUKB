@@ -40,6 +40,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -1434,6 +1435,8 @@ def set_cell_value(cell: ET.Element, value: Any) -> None:
         ET.SubElement(cell, xq("v")).text = "1" if value else "0"
         return
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            return
         # Excel Open XML всегда использует точку как десятичный разделитель.
         cell.attrib.pop("t", None)
         ET.SubElement(cell, xq("v")).text = repr(float(value)) if isinstance(value, float) else str(value)
@@ -1872,6 +1875,7 @@ def write_dataframe_to_excel_table(
         zip_bytes: Dict[str, bytes] = {name: zin.read(name) for name in zin.namelist()}
         zip_infos: Dict[str, zipfile.ZipInfo] = {info.filename: info for info in zin.infolist()}
         zip_order: List[str] = zin.namelist()
+        zip_comment = zin.comment
 
     sheet_to_path, table_map = worksheet_and_table_maps(zip_bytes)
     logger.debug("Worksheet map: %s", sheet_to_path)
@@ -1945,6 +1949,7 @@ def write_dataframe_to_excel_table(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Сохраняю книгу ZIP/XML без переписывания неподронутых частей: %s", output_path)
     with zipfile.ZipFile(output_path, "w") as zout:
+        zout.comment = zip_comment
         written = set()
         for name in zip_order:
             info = zip_infos[name]
@@ -2000,6 +2005,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         output_path = xlsx_path.with_name(xlsx_path.stem + suffix)
     else:
         output_path = args.output.resolve()
+    if output_path == xlsx_path:
+        parser.error("--output не должен совпадать с исходным .xlsx: скрипт всегда пишет результат в отдельную книгу")
     cache_dir = args.cache_dir or xlsx_path.with_name("pq_html_cache")
     debug_dir = args.debug_dir.resolve() if args.debug_dir else (xlsx_path.with_name(xlsx_path.stem + "_debug") if args.debug else None)
     if debug_dir is not None:
