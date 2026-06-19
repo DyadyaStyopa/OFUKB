@@ -6,3 +6,9 @@ __pycache__/
 .codex/
 .build/
 dist/
+AGENTS.md
+pq_html_cache/
+
+*.sqlite
+*.sqlite3
+*.db

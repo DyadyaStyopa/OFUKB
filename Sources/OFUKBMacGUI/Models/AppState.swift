@@ -214,7 +214,7 @@ final class AppState: ObservableObject {
 
     private func backendArguments() -> [String] {
         if sqliteAllBanks {
-            var args: [String] = [xlsxPath, "--all-banks"]
+            var args: [String] = [xlsxPath, "--all-banks", "--workers", "4"]
             if !outputPath.isEmpty {
                 args += ["--output", outputPath]
             }

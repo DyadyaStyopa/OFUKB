@@ -428,7 +428,7 @@ class PowerQueryExcelGUI(tk.Tk):
     def build_backend_args(self) -> List[str]:
         xlsx = self.var_xlsx.get().strip()
         if self.var_sqlite_all_banks.get():
-            args = [xlsx, "--all-banks"]
+            args = [xlsx, "--all-banks", "--workers", "4"]
             output = self.var_output.get().strip()
             if output:
                 args += ["--output", output]

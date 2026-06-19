@@ -110,7 +110,13 @@ while IFS= read -r -d '' path; do
   /usr/bin/xattr -d com.apple.macl "$path" >/dev/null 2>&1 || true
   /usr/bin/xattr -d 'com.apple.fileprovider.fpfs#P' "$path" >/dev/null 2>&1 || true
 done < <(find "$APP_BUNDLE" -print0)
-/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"; then
+  if /usr/bin/xattr -l "$APP_BUNDLE" | /usr/bin/grep -Eq 'com\.apple\.(FinderInfo|fileprovider\.fpfs#P)'; then
+    echo "warning: final app copy has FileProvider xattrs in $APP_BUNDLE; staged signed app was verified before copy" >&2
+  else
+    exit 1
+  fi
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

@@ -29,7 +29,7 @@
 Нужен Python 3. Обязательные Python-зависимости для backend-скрипта:
 
 ```bash
-pip install pandas requests beautifulsoup4 lxml
+pip install pandas requests beautifulsoup4 lxml openpyxl
 ```
 
 Для графического интерфейса используется `tkinter`. На macOS и Windows он обычно входит в стандартную установку Python. На Linux может потребоваться системный пакет, например `python3-tk`.
@@ -37,10 +37,10 @@ pip install pandas requests beautifulsoup4 lxml
 Опциональные зависимости:
 
 ```bash
-pip install openpyxl pyinstaller
+pip install pyinstaller
 ```
 
-- `openpyxl` можно использовать для дополнительной ручной проверки, что итоговая книга открывается как Excel-файл. Сам скрипт записывает `.xlsx` напрямую через ZIP/XML и не требует `openpyxl` для основной работы.
+- `openpyxl` нужен SQLite-экспортёру для чтения XLSX-выгрузки списка банков с сайта ЦБ. Сам Excel-backend записывает `.xlsx` напрямую через ZIP/XML.
 - `pyinstaller` нужен только для сборки GUI в `.app` или `.exe`; для обычного запуска из Python он не требуется.
 
 
@@ -52,7 +52,7 @@ pip install openpyxl pyinstaller
 python3 pq_excel_gui.py
 ```
 
-В окне можно выбрать `test.xlsx`, указать `regnum`, путь выходного файла, папку HTML-кэша, лог и debug-папку. GUI запускает backend в отдельном процессе и показывает вывод выполнения в окне.
+В окне можно выбрать `test.xlsx`, указать `regnum`, путь выходного файла, папку HTML-кэша, лог и debug-папку. Также есть режим SQLite-выгрузки по всем действующим банкам ЦБ. GUI запускает backend или SQLite-экспортёр в отдельном процессе и показывает вывод выполнения в окне.
 
 Текущая архитектура GUI рассчитана на будущую упаковку в приложение: backend вызывается как Python-модуль, а не как отдельная команда через внешний интерпретатор Python.
 
@@ -121,8 +121,8 @@ productbuild --component "dist/OFUKB CBR PQ.app" /Applications "dist/OFUKB CBR P
 ### Windows: сборка `.exe`
 
 ```bash
-python -m pip install pandas requests beautifulsoup4 lxml pyinstaller
-python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.ico --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
+python -m pip install pandas requests beautifulsoup4 lxml openpyxl pyinstaller
+python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.ico --add-data "OFUKB_CBR_PQ_alt_parser.py;." --add-data "cbr_sqlite_export.py;." pq_excel_gui.py
 ```
 
 Результат будет в папке:
@@ -192,6 +192,40 @@ python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --list
 ```
 
 Этот режим не создает новый `.xlsx`.
+
+## Экспорт данных ЦБ в SQLite
+
+Побочный продукт для массового сбора по банкам:
+
+```bash
+python3 cbr_sqlite_export.py test.xlsx --regnums-file banks.csv -o cbr_banks.sqlite --replace
+```
+
+Файл `banks.csv` может быть простым списком:
+
+```text
+1000
+1481,Сбербанк
+2673,Т-Банк
+```
+
+Скрипт выполняет те же Power Query запросы, что и Excel-экспорт, но не создает `.xlsx`. Для каждого запроса создается отдельная SQLite-таблица с полями `regnum`, `bank_name`, `query_name`, `collected_at`, `row_number` и исходными колонками формы. Служебные таблицы: `export_banks`, `export_queries`, `export_errors`.
+
+Для тестового прогона по одному банку:
+
+```bash
+python3 cbr_sqlite_export.py test.xlsx --regnum 1000 -o cbr_banks.sqlite --replace
+```
+
+Можно автоматически взять список банков с публичной страницы ЦБ:
+
+```bash
+python3 cbr_sqlite_export.py test.xlsx --all-banks -o cbr_banks.sqlite --replace
+```
+
+В этом режиме скрипт скачивает XLSX-версию таблицы ЦБ, если ссылка доступна, и импортирует только банки с действующей лицензией. Небанковские кредитные организации (`НКО`, `РНКО`, `НБКО` и похожие значения в колонке `Вид`) пропускаются.
+
+Для воспроизводимых массовых прогонов надежнее хранить список `regnum` в файле и передавать его через `--regnums-file`.
 
 ## Сохранить извлеченный M-код
 
@@ -301,6 +335,6 @@ xl/workbook.xml
 Пример:
 
 ```bash
-pip install pandas requests beautifulsoup4 lxml
+pip install pandas requests beautifulsoup4 lxml openpyxl
 python3 OFUKB_CBR_PQ_alt_parser.py test.xlsx --regnum 1000 --verbose
 ```

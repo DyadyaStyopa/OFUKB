@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import io
 import json
 import logging
@@ -40,6 +41,21 @@ from OFUKB_CBR_PQ_alt_parser import (
 class BankRef:
     regnum: str
     name: str = ""
+
+
+@dataclass
+class QueryFrame:
+    query_name: str
+    table: str
+    df: pd.DataFrame
+
+
+@dataclass
+class BankExportData:
+    bank: BankRef
+    frames: List[QueryFrame]
+    query_count: int
+    rows_written: int
 
 
 def setup_logging(verbose: bool) -> logging.Logger:
@@ -297,6 +313,62 @@ def write_query_frame(
     out.to_sql(table, conn, if_exists="append", index=False)
 
 
+def mark_bank_started(conn: sqlite3.Connection, bank: BankRef) -> None:
+    started_at = sqlite_now(conn)
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO export_banks
+            (regnum, bank_name, status, started_at, finished_at, error)
+        VALUES (?, ?, 'running', ?, NULL, NULL)
+        """,
+        (bank.regnum, bank.name, started_at),
+    )
+    conn.commit()
+
+
+def collect_bank_data(
+    *,
+    bank: BankRef,
+    base_m_code: str,
+    loaded_queries: Sequence,
+    query_tables: Dict[str, str],
+    selected_queries: Optional[set],
+    cache_dir: Path,
+    use_cache: bool,
+    timeout: int,
+    verbose: bool,
+    logger: logging.Logger,
+) -> BankExportData:
+    m_code = replace_regnum_in_m_code(base_m_code, bank.regnum)
+    engine = MiniMEngine(
+        m_code,
+        cache_dir=cache_dir,
+        use_cache=use_cache,
+        timeout=timeout,
+        logger=logger,
+        verbose=verbose,
+    )
+
+    frames: List[QueryFrame] = []
+    rows_written = 0
+    query_count = 0
+    for item in loaded_queries:
+        if selected_queries is not None and item.query_name not in selected_queries:
+            continue
+        df = engine.evaluate_query(item.query_name)
+        frames.append(QueryFrame(query_name=item.query_name, table=query_tables[item.query_name], df=df))
+        rows_written += len(df)
+        query_count += 1
+        logger.info(
+            "regnum=%s query=%s получено строк=%d %s",
+            bank.regnum,
+            item.query_name,
+            len(df),
+            df_debug_summary(df),
+        )
+    return BankExportData(bank=bank, frames=frames, query_count=query_count, rows_written=rows_written)
+
+
 def export_bank(
     *,
     conn: sqlite3.Connection,
@@ -311,50 +383,35 @@ def export_bank(
     verbose: bool,
     logger: logging.Logger,
 ) -> Tuple[int, int]:
-    started_at = sqlite_now(conn)
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO export_banks
-            (regnum, bank_name, status, started_at, finished_at, error)
-        VALUES (?, ?, 'running', ?, NULL, NULL)
-        """,
-        (bank.regnum, bank.name, started_at),
-    )
-    conn.commit()
-
-    m_code = replace_regnum_in_m_code(base_m_code, bank.regnum)
-    engine = MiniMEngine(
-        m_code,
+    mark_bank_started(conn, bank)
+    data = collect_bank_data(
+        bank=bank,
+        base_m_code=base_m_code,
+        loaded_queries=loaded_queries,
+        query_tables=query_tables,
+        selected_queries=selected_queries,
         cache_dir=cache_dir,
         use_cache=use_cache,
         timeout=timeout,
-        logger=logger,
         verbose=verbose,
+        logger=logger,
     )
-    rows_written = 0
-    query_count = 0
-
-    for item in loaded_queries:
-        if selected_queries is not None and item.query_name not in selected_queries:
-            continue
+    for frame in data.frames:
         try:
-            df = engine.evaluate_query(item.query_name)
             write_query_frame(
                 conn,
-                table=query_tables[item.query_name],
+                table=frame.table,
                 regnum=bank.regnum,
                 bank_name=bank.name,
-                query_name=item.query_name,
-                df=df,
+                query_name=frame.query_name,
+                df=frame.df,
             )
-            rows_written += len(df)
-            query_count += 1
             logger.info(
                 "regnum=%s query=%s записано строк=%d %s",
                 bank.regnum,
-                item.query_name,
-                len(df),
-                df_debug_summary(df),
+                frame.query_name,
+                len(frame.df),
+                df_debug_summary(frame.df),
             )
         except Exception as exc:
             conn.execute(
@@ -362,7 +419,7 @@ def export_bank(
                 INSERT INTO export_errors (regnum, bank_name, query_name, error, traceback, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (bank.regnum, bank.name, item.query_name, str(exc), traceback.format_exc(), sqlite_now(conn)),
+                (bank.regnum, bank.name, frame.query_name, str(exc), traceback.format_exc(), sqlite_now(conn)),
             )
             raise
     conn.execute(
@@ -370,7 +427,31 @@ def export_bank(
         (sqlite_now(conn), bank.regnum),
     )
     conn.commit()
-    return query_count, rows_written
+    return data.query_count, data.rows_written
+
+
+def write_bank_data(conn: sqlite3.Connection, data: BankExportData, logger: logging.Logger) -> None:
+    for frame in data.frames:
+        write_query_frame(
+            conn,
+            table=frame.table,
+            regnum=data.bank.regnum,
+            bank_name=data.bank.name,
+            query_name=frame.query_name,
+            df=frame.df,
+        )
+        logger.info(
+            "regnum=%s query=%s записано строк=%d %s",
+            data.bank.regnum,
+            frame.query_name,
+            len(frame.df),
+            df_debug_summary(frame.df),
+        )
+    conn.execute(
+        "UPDATE export_banks SET status='ok', finished_at=?, error=NULL WHERE regnum=?",
+        (sqlite_now(conn), data.bank.regnum),
+    )
+    conn.commit()
 
 
 def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
@@ -387,6 +468,7 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=None, help="Папка HTML-кэша")
     parser.add_argument("--no-cache", action="store_true", help="Не использовать HTML-кэш")
     parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout в секундах")
+    parser.add_argument("--workers", type=int, default=1, help="Количество параллельных загрузчиков банков. 1 = последовательный режим")
     parser.add_argument("--fail-fast", action="store_true", help="Остановиться на первой ошибке банка/запроса")
     parser.add_argument("--verbose", action="store_true", help="Подробный вывод")
     return parser.parse_args(argv)
@@ -396,6 +478,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     if args.replace and args.append:
         raise SystemExit("Нельзя одновременно использовать --replace и --append.")
+    if args.workers < 1:
+        raise SystemExit("--workers должен быть не меньше 1.")
 
     logger = setup_logging(args.verbose)
     xlsx_path = args.xlsx.resolve()
@@ -436,42 +520,96 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("SQLite: %s", db_path)
     logger.info("Банков к обработке: %d", len(banks))
     logger.info("Загружаемых запросов в книге: %d", len(loaded_queries))
+    logger.info("Параллельных загрузчиков: %d", min(args.workers, len(banks)))
 
     ok_count = 0
     failed_count = 0
     total_rows = 0
     try:
-        for idx, bank in enumerate(banks, start=1):
-            logger.info("[%d/%d] regnum=%s %s", idx, len(banks), bank.regnum, bank.name)
-            try:
-                query_count, rows_written = export_bank(
-                    conn=conn,
-                    bank=bank,
-                    base_m_code=base_m_code,
-                    loaded_queries=loaded_queries,
-                    query_tables=query_tables,
-                    selected_queries=selected_queries,
-                    cache_dir=cache_dir,
-                    use_cache=not args.no_cache,
-                    timeout=args.timeout,
-                    verbose=args.verbose,
-                    logger=logger,
-                )
-                ok_count += 1
-                total_rows += rows_written
-                logger.info("regnum=%s готов: запросов=%d строк=%d", bank.regnum, query_count, rows_written)
-            except Exception as exc:
-                failed_count += 1
-                conn.execute(
-                    "UPDATE export_banks SET status='error', finished_at=?, error=? WHERE regnum=?",
-                    (sqlite_now(conn), str(exc), bank.regnum),
-                )
-                conn.commit()
-                logger.error("regnum=%s ошибка: %s", bank.regnum, exc)
-                logger.debug(traceback.format_exc())
-                if args.fail_fast:
-                    raise
-            time.sleep(0.05)
+        if args.workers == 1 or len(banks) <= 1:
+            for idx, bank in enumerate(banks, start=1):
+                logger.info("[%d/%d] regnum=%s %s", idx, len(banks), bank.regnum, bank.name)
+                try:
+                    query_count, rows_written = export_bank(
+                        conn=conn,
+                        bank=bank,
+                        base_m_code=base_m_code,
+                        loaded_queries=loaded_queries,
+                        query_tables=query_tables,
+                        selected_queries=selected_queries,
+                        cache_dir=cache_dir,
+                        use_cache=not args.no_cache,
+                        timeout=args.timeout,
+                        verbose=args.verbose,
+                        logger=logger,
+                    )
+                    ok_count += 1
+                    total_rows += rows_written
+                    logger.info("regnum=%s готов: запросов=%d строк=%d", bank.regnum, query_count, rows_written)
+                except Exception as exc:
+                    failed_count += 1
+                    conn.execute(
+                        "UPDATE export_banks SET status='error', finished_at=?, error=? WHERE regnum=?",
+                        (sqlite_now(conn), str(exc), bank.regnum),
+                    )
+                    conn.commit()
+                    logger.error("regnum=%s ошибка: %s", bank.regnum, exc)
+                    logger.debug(traceback.format_exc())
+                    if args.fail_fast:
+                        raise
+                time.sleep(0.05)
+        else:
+            worker_count = min(args.workers, len(banks))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {}
+                for idx, bank in enumerate(banks, start=1):
+                    logger.info("[%d/%d] regnum=%s %s", idx, len(banks), bank.regnum, bank.name)
+                    mark_bank_started(conn, bank)
+                    future = executor.submit(
+                        collect_bank_data,
+                        bank=bank,
+                        base_m_code=base_m_code,
+                        loaded_queries=loaded_queries,
+                        query_tables=query_tables,
+                        selected_queries=selected_queries,
+                        cache_dir=cache_dir,
+                        use_cache=not args.no_cache,
+                        timeout=args.timeout,
+                        verbose=args.verbose,
+                        logger=logger,
+                    )
+                    futures[future] = bank
+
+                for done_no, future in enumerate(as_completed(futures), start=1):
+                    bank = futures[future]
+                    try:
+                        data = future.result()
+                        write_bank_data(conn, data, logger)
+                        ok_count += 1
+                        total_rows += data.rows_written
+                        logger.info(
+                            "[%d/%d] regnum=%s готов: запросов=%d строк=%d",
+                            done_no,
+                            len(banks),
+                            bank.regnum,
+                            data.query_count,
+                            data.rows_written,
+                        )
+                    except Exception as exc:
+                        failed_count += 1
+                        conn.execute(
+                            "UPDATE export_banks SET status='error', finished_at=?, error=? WHERE regnum=?",
+                            (sqlite_now(conn), str(exc), bank.regnum),
+                        )
+                        conn.commit()
+                        logger.error("[%d/%d] regnum=%s ошибка: %s", done_no, len(banks), bank.regnum, exc)
+                        logger.debug(traceback.format_exc())
+                        if args.fail_fast:
+                            for pending in futures:
+                                pending.cancel()
+                            raise
+                    finally:
+                        time.sleep(0.05)
     finally:
         conn.close()
 
