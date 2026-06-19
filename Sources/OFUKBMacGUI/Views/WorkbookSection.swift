@@ -28,10 +28,11 @@ struct WorkbookSection: View {
                     TextField("Например 1000", text: $appState.regnum)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 150)
+                        .disabled(appState.sqliteAllBanks)
                         .onChangeCompat(of: appState.regnum) {
                             appState.refreshOutputPath()
                         }
-                    Text("Пусто = использовать номер из M-кода")
+                    Text(appState.sqliteAllBanks ? "В SQLite-режиме берутся все действующие банки ЦБ" : "Пусто = использовать номер из M-кода")
                         .foregroundStyle(.secondary)
                 }
 

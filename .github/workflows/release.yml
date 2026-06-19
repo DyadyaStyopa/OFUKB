@@ -48,11 +48,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pandas requests beautifulsoup4 lxml pyinstaller
+          python -m pip install pandas requests beautifulsoup4 lxml openpyxl pyinstaller
 
       - name: Build exe
         run: |
-          python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.ico --add-data "OFUKB_CBR_PQ_alt_parser.py;." pq_excel_gui.py
+          python -m PyInstaller --noconsole --onedir --name "OFUKB CBR PQ" --icon assets/app_icon.ico --add-data "OFUKB_CBR_PQ_alt_parser.py;." --add-data "cbr_sqlite_export.py;." pq_excel_gui.py
 
       - name: Archive exe
         shell: pwsh

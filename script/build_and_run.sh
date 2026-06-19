@@ -30,6 +30,7 @@ done < <(find "$ROOT_DIR/Sources/OFUKBMacGUI" -name '*.swift' -print0 | sort -z)
 xcrun swiftc -parse-as-library -O "${SWIFT_FILES[@]}" -o "$APP_BINARY"
 chmod +x "$APP_BINARY"
 cp "$ROOT_DIR/OFUKB_CBR_PQ_alt_parser.py" "$APP_RESOURCES/OFUKB_CBR_PQ_alt_parser.py"
+cp "$ROOT_DIR/cbr_sqlite_export.py" "$APP_RESOURCES/cbr_sqlite_export.py"
 cp "$ROOT_DIR/assets/app_icon.icns" "$APP_RESOURCES/app_icon.icns"
 cp "$ROOT_DIR/assets/app_icon.png" "$APP_RESOURCES/app_icon.png"
 cp "$ROOT_DIR/requirements.txt" "$APP_RESOURCES/requirements.txt"

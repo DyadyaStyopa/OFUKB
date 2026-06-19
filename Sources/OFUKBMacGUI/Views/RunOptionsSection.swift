@@ -16,6 +16,14 @@ struct RunOptionsSection: View {
                     Toggle("Только список таблиц", isOn: $appState.listOnly)
                     EmptyView()
                 }
+                GridRow {
+                    Toggle("SQLite по всем действующим банкам", isOn: $appState.sqliteAllBanks)
+                        .onChangeCompat(of: appState.sqliteAllBanks) {
+                            appState.toggleSQLiteAllBanks()
+                        }
+                    EmptyView()
+                    EmptyView()
+                }
             }
             .toggleStyle(.checkbox)
             .padding(6)

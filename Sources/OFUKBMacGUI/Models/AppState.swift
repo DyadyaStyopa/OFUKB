@@ -15,6 +15,7 @@ final class AppState: ObservableObject {
     @Published var noCache = false
     @Published var dumpM = false
     @Published var listOnly = false
+    @Published var sqliteAllBanks = false
 
     @Published var logText = ""
     @Published var status = RunStatus.idle
@@ -45,7 +46,11 @@ final class AppState: ObservableObject {
     }
 
     var commandPreview: String {
-        (["python3", BackendLocator.displayName] + backendArguments()).quotedCommand
+        (["python3", activeScriptDisplayName] + backendArguments()).quotedCommand
+    }
+
+    private var activeScriptDisplayName: String {
+        sqliteAllBanks ? BackendLocator.sqliteExporterDisplayName : BackendLocator.displayName
     }
 
     func chooseXLSX() {
@@ -64,8 +69,10 @@ final class AppState: ObservableObject {
 
     func chooseOutput() {
         let panel = NSSavePanel()
-        panel.title = "Куда сохранить заполненную книгу"
-        panel.allowedContentTypes = [.xlsx]
+        panel.title = "Куда сохранить результат"
+        if !sqliteAllBanks {
+            panel.allowedContentTypes = [.xlsx]
+        }
         panel.nameFieldStringValue = defaultOutputName()
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
@@ -116,10 +123,17 @@ final class AppState: ObservableObject {
         }
     }
 
+    func toggleSQLiteAllBanks() {
+        if outputUsesAutoPath || outputPath.isEmpty {
+            outputPath = defaultOutputPath()
+            outputUsesAutoPath = true
+        }
+    }
+
     func run() {
         guard !isRunning else { return }
-        guard let backend = BackendLocator.findBackend() else {
-            appendLog("Не найден \(BackendLocator.displayName). Положите backend рядом с приложением или в корень репозитория.\n")
+        guard let backend = activeScriptURL() else {
+            appendLog("Не найден \(activeScriptDisplayName). Положите скрипт рядом с приложением или в корень репозитория.\n")
             status = .failed(1)
             return
         }
@@ -192,6 +206,18 @@ final class AppState: ObservableObject {
     }
 
     private func backendArguments() -> [String] {
+        if sqliteAllBanks {
+            var args: [String] = [xlsxPath, "--all-banks"]
+            if !outputPath.isEmpty {
+                args += ["--output", outputPath]
+            }
+            args.append("--replace")
+            if noCache { args.append("--no-cache") }
+            if verbose { args.append("--verbose") }
+            if !cacheDir.isEmpty { args += ["--cache-dir", cacheDir] }
+            return args
+        }
+
         var args: [String] = [xlsxPath]
         if !outputPath.isEmpty && !listOnly {
             args += ["--output", outputPath]
@@ -213,13 +239,20 @@ final class AppState: ObservableObject {
     private func defaultOutputPath() -> String {
         guard !xlsxPath.isEmpty else { return "" }
         let url = URL(fileURLWithPath: xlsxPath)
+        if sqliteAllBanks {
+            return url.deletingPathExtension().path + "_all_active_banks.sqlite"
+        }
         let suffix = regnum.isEmpty ? "_python_filled.xlsx" : "_regnum_\(regnum)_python_filled.xlsx"
         return url.deletingPathExtension().path + suffix
     }
 
     private func defaultOutputName() -> String {
-        guard !xlsxPath.isEmpty else { return "result.xlsx" }
+        guard !xlsxPath.isEmpty else { return sqliteAllBanks ? "cbr_banks.sqlite" : "result.xlsx" }
         return URL(fileURLWithPath: defaultOutputPath()).lastPathComponent
+    }
+
+    private func activeScriptURL() -> URL? {
+        sqliteAllBanks ? BackendLocator.findSQLiteExporter() : BackendLocator.findBackend()
     }
 
     private func chooseDirectory(title: String, completion: @escaping (String) -> Void) {

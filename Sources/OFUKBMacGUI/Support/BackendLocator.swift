@@ -2,12 +2,18 @@ import Foundation
 
 enum BackendLocator {
     static let displayName = "OFUKB_CBR_PQ_alt_parser.py"
+    static let sqliteExporterDisplayName = "cbr_sqlite_export.py"
 
     static func findBackend() -> URL? {
-        if let bundled = Bundle.main.url(
-            forResource: "OFUKB_CBR_PQ_alt_parser",
-            withExtension: "py"
-        ) {
+        findScript(displayName: displayName, resourceName: "OFUKB_CBR_PQ_alt_parser")
+    }
+
+    static func findSQLiteExporter() -> URL? {
+        findScript(displayName: sqliteExporterDisplayName, resourceName: "cbr_sqlite_export")
+    }
+
+    private static func findScript(displayName: String, resourceName: String) -> URL? {
+        if let bundled = Bundle.main.url(forResource: resourceName, withExtension: "py") {
             return bundled
         }
 

@@ -30,6 +30,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 APP_TITLE = "Заполнение Excel из данных ЦБ"
 BACKEND_FILENAME = "OFUKB_CBR_PQ_alt_parser.py"
+SQLITE_EXPORTER_FILENAME = "cbr_sqlite_export.py"
 SETTINGS_FILE = Path.home() / ".pq_excel_gui_settings.json"
 PROCESS_DONE = "__PROCESS_DONE__"
 
@@ -53,13 +54,23 @@ def app_dir() -> Path:
 
 def find_backend_script() -> Optional[Path]:
     """Пытается найти backend рядом с GUI."""
+    return find_python_script(BACKEND_FILENAME, "OFUKB_CBR_PQ_alt_parser*.py")
+
+
+def find_sqlite_exporter_script() -> Optional[Path]:
+    """Пытается найти SQLite-экспортёр рядом с GUI."""
+    return find_python_script(SQLITE_EXPORTER_FILENAME, "cbr_sqlite_export*.py")
+
+
+def find_python_script(filename: str, pattern: str) -> Optional[Path]:
+    """Пытается найти Python-скрипт рядом с GUI."""
     folder = app_dir()
-    exact = folder / BACKEND_FILENAME
+    exact = folder / filename
     if exact.exists():
         return exact
 
     candidates = sorted(
-        folder.glob("OFUKB_CBR_PQ_alt_parser*.py"),
+        folder.glob(pattern),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -80,6 +91,10 @@ def resolve_backend_script(value: str) -> Optional[Path]:
     return None
 
 
+def resolve_sqlite_exporter_script() -> Optional[Path]:
+    return find_sqlite_exporter_script()
+
+
 def quote_command(args: List[str]) -> str:
     """Красиво экранирует команду для отображения/копирования."""
     return " ".join(shlex.quote(str(a)) for a in args)
@@ -92,6 +107,14 @@ def default_output_path(xlsx_path: str, regnum: str) -> str:
     p = Path(xlsx_path).expanduser()
     suffix = f"_regnum_{regnum}_python_filled.xlsx" if regnum else "_python_filled.xlsx"
     return str(p.with_name(p.stem + suffix))
+
+
+def default_sqlite_output_path(xlsx_path: str) -> str:
+    """Строит путь SQLite-базы рядом с исходной книгой."""
+    if not xlsx_path:
+        return ""
+    p = Path(xlsx_path).expanduser()
+    return str(p.with_name(p.stem + "_all_active_banks.sqlite"))
 
 
 def open_path(path: Path) -> None:
@@ -146,7 +169,8 @@ def run_backend_worker(backend_path: str, backend_args: List[str], cwd: str, out
         os.chdir(cwd)
         backend = Path(backend_path).expanduser().resolve()
         sys.path.insert(0, str(backend.parent))
-        spec = importlib.util.spec_from_file_location("ofukb_cbr_pq_alt_parser_backend", backend)
+        module_name = "ofukb_gui_worker_" + re.sub(r"\W+", "_", backend.stem)
+        spec = importlib.util.spec_from_file_location(module_name, backend)
         if spec is None or spec.loader is None:
             raise RuntimeError(f"Не удалось загрузить backend-модуль: {backend}")
         module = importlib.util.module_from_spec(spec)
@@ -204,6 +228,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.var_no_cache = tk.BooleanVar(value=self.settings.get("no_cache", "0") == "1")
         self.var_dump_m = tk.BooleanVar(value=self.settings.get("dump_m", "0") == "1")
         self.var_list_only = tk.BooleanVar(value=False)
+        self.var_sqlite_all_banks = tk.BooleanVar(value=self.settings.get("sqlite_all_banks", "0") == "1")
 
         self._build_ui()
         self._bind_events()
@@ -222,7 +247,7 @@ class PowerQueryExcelGUI(tk.Tk):
         top.columnconfigure(1, weight=1)
 
         self._add_path_row(top, 0, "Excel-файл:", self.var_xlsx, self.choose_xlsx, "Выбрать .xlsx")
-        self._add_path_row(top, 1, "Выходной файл:", self.var_output, self.choose_output, "Куда сохранить")
+        self._add_path_row(top, 1, "Результат:", self.var_output, self.choose_output, "Куда сохранить")
 
         reg_frame = ttk.Frame(top)
         reg_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
@@ -245,6 +270,7 @@ class PowerQueryExcelGUI(tk.Tk):
         ttk.Checkbutton(options, text="Не использовать кэш (--no-cache)", variable=self.var_no_cache).grid(row=0, column=2, sticky="w")
         ttk.Checkbutton(options, text="Сохранить M-код (--dump-m)", variable=self.var_dump_m).grid(row=0, column=3, sticky="w")
         ttk.Checkbutton(options, text="Только список таблиц (--list)", variable=self.var_list_only).grid(row=0, column=4, sticky="w")
+        ttk.Checkbutton(options, text="SQLite по всем действующим банкам", variable=self.var_sqlite_all_banks).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         advanced = ttk.LabelFrame(top, text="Дополнительные пути", padding=10)
         advanced.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
@@ -308,6 +334,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.var_regnum.trace_add("write", lambda *_: self._on_regnum_changed())
         for var in [self.var_verbose, self.var_debug, self.var_no_cache, self.var_dump_m, self.var_list_only]:
             var.trace_add("write", lambda *_: self.update_command_preview())
+        self.var_sqlite_all_banks.trace_add("write", lambda *_: self._on_mode_changed())
 
     def _on_regnum_changed(self) -> None:
         old_regnum = getattr(self, "_last_regnum", "")
@@ -316,8 +343,18 @@ class PowerQueryExcelGUI(tk.Tk):
         output = self.var_output.get().strip()
         old_auto_output = default_output_path(xlsx, old_regnum) if xlsx else ""
         if xlsx and (not output or output == old_auto_output):
-            self.var_output.set(default_output_path(xlsx, new_regnum))
+            self.var_output.set(self.default_output_for_current_mode(xlsx, new_regnum))
         self._last_regnum = new_regnum
+        self.update_command_preview()
+
+    def _on_mode_changed(self) -> None:
+        xlsx = self.var_xlsx.get().strip()
+        output = self.var_output.get().strip()
+        old_regnum = getattr(self, "_last_regnum", self.var_regnum.get().strip())
+        excel_auto = default_output_path(xlsx, old_regnum) if xlsx else ""
+        sqlite_auto = default_sqlite_output_path(xlsx) if xlsx else ""
+        if xlsx and (not output or output in {excel_auto, sqlite_auto}):
+            self.var_output.set(self.default_output_for_current_mode(xlsx, self.var_regnum.get().strip()))
         self.update_command_preview()
 
     # ------------------------------------------------------------------
@@ -345,10 +382,12 @@ class PowerQueryExcelGUI(tk.Tk):
     def choose_output(self) -> None:
         initialdir = str(Path(self.var_xlsx.get()).expanduser().parent) if self.var_xlsx.get() else str(Path.home())
         path = filedialog.asksaveasfilename(
-            title="Куда сохранить заполненную книгу",
+            title="Куда сохранить результат",
             initialdir=initialdir,
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            defaultextension=".sqlite" if self.var_sqlite_all_banks.get() else ".xlsx",
+            filetypes=[("SQLite files", "*.sqlite *.db"), ("All files", "*.*")]
+            if self.var_sqlite_all_banks.get()
+            else [("Excel files", "*.xlsx"), ("All files", "*.*")],
         )
         if path:
             self.var_output.set(path)
@@ -388,6 +427,21 @@ class PowerQueryExcelGUI(tk.Tk):
 
     def build_backend_args(self) -> List[str]:
         xlsx = self.var_xlsx.get().strip()
+        if self.var_sqlite_all_banks.get():
+            args = [xlsx, "--all-banks"]
+            output = self.var_output.get().strip()
+            if output:
+                args += ["--output", output]
+            args.append("--replace")
+            if self.var_no_cache.get():
+                args.append("--no-cache")
+            if self.var_verbose.get():
+                args.append("--verbose")
+            cache_dir = self.var_cache_dir.get().strip()
+            if cache_dir:
+                args += ["--cache-dir", cache_dir]
+            return args
+
         args = [xlsx]
 
         output = self.var_output.get().strip()
@@ -422,15 +476,23 @@ class PowerQueryExcelGUI(tk.Tk):
         return args
 
     def build_display_command(self) -> List[str]:
-        backend = self.var_backend.get().strip() or BACKEND_FILENAME
-        return ["python3", backend] + self.build_backend_args()
+        if self.var_sqlite_all_banks.get():
+            script = str(resolve_sqlite_exporter_script() or SQLITE_EXPORTER_FILENAME)
+        else:
+            script = self.var_backend.get().strip() or BACKEND_FILENAME
+        return ["python3", script] + self.build_backend_args()
 
     def validate_inputs(self) -> bool:
         backend = resolve_backend_script(self.var_backend.get())
         xlsx = Path(self.var_xlsx.get().strip()).expanduser()
         regnum = self.var_regnum.get().strip()
 
-        if backend is None:
+        if self.var_sqlite_all_banks.get():
+            exporter = resolve_sqlite_exporter_script()
+            if exporter is None:
+                messagebox.showerror("Ошибка", f"Не найден SQLite-экспортёр:\n{SQLITE_EXPORTER_FILENAME}\n\nПоложите GUI рядом с {SQLITE_EXPORTER_FILENAME}.")
+                return False
+        elif backend is None:
             messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{self.var_backend.get().strip() or BACKEND_FILENAME}\n\nПоложите GUI рядом с {BACKEND_FILENAME} или выберите скрипт вручную.")
             return False
         if not xlsx.exists():
@@ -439,7 +501,7 @@ class PowerQueryExcelGUI(tk.Tk):
         if xlsx.suffix.lower() != ".xlsx":
             if not messagebox.askyesno("Предупреждение", "Файл не имеет расширения .xlsx. Всё равно продолжить?"):
                 return False
-        if regnum and not re.fullmatch(r"\d+", regnum):
+        if not self.var_sqlite_all_banks.get() and regnum and not re.fullmatch(r"\d+", regnum):
             messagebox.showerror("Ошибка", "regnum должен состоять только из цифр, например 1000 или 1481.")
             return False
         return True
@@ -452,7 +514,12 @@ class PowerQueryExcelGUI(tk.Tk):
         self.command_text.configure(state="disabled")
 
     def set_auto_output(self) -> None:
-        self.var_output.set(default_output_path(self.var_xlsx.get().strip(), self.var_regnum.get().strip()))
+        self.var_output.set(self.default_output_for_current_mode(self.var_xlsx.get().strip(), self.var_regnum.get().strip()))
+
+    def default_output_for_current_mode(self, xlsx: str, regnum: str) -> str:
+        if self.var_sqlite_all_banks.get():
+            return default_sqlite_output_path(xlsx)
+        return default_output_path(xlsx, regnum)
 
     def copy_command(self) -> None:
         command = quote_command(self.build_display_command())
@@ -476,9 +543,10 @@ class PowerQueryExcelGUI(tk.Tk):
         backend_args = self.build_backend_args()
         self.append_log("Эквивалентная команда:\n" + quote_command(self.build_display_command()) + "\n\n")
 
-        backend = resolve_backend_script(self.var_backend.get())
+        backend = resolve_sqlite_exporter_script() if self.var_sqlite_all_banks.get() else resolve_backend_script(self.var_backend.get())
         if backend is None:
-            messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{self.var_backend.get().strip() or BACKEND_FILENAME}")
+            missing = SQLITE_EXPORTER_FILENAME if self.var_sqlite_all_banks.get() else (self.var_backend.get().strip() or BACKEND_FILENAME)
+            messagebox.showerror("Ошибка", f"Не найден скрипт:\n{missing}")
             return
         backend_path = str(backend)
         cwd = str(Path(self.var_xlsx.get()).expanduser().parent)
@@ -550,7 +618,7 @@ class PowerQueryExcelGUI(tk.Tk):
             return
         if not messagebox.askyesno(
             "Остановить",
-            "Остановить выполнение скрипта?\n\nОсновной выходной файл защищён атомарной записью, но временный .tmp.xlsx может остаться рядом с ним.",
+            "Остановить выполнение скрипта?\n\nПри Excel-режиме временный .tmp.xlsx может остаться рядом с результатом. При SQLite-выгрузке уже записанные строки останутся в базе.",
         ):
             return
         try:
@@ -584,7 +652,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.status.set(f"Лог сохранён: {path}")
 
     def open_output(self) -> None:
-        path = self.var_output.get().strip() or default_output_path(self.var_xlsx.get().strip(), self.var_regnum.get().strip())
+        path = self.var_output.get().strip() or self.default_output_for_current_mode(self.var_xlsx.get().strip(), self.var_regnum.get().strip())
         if not path:
             messagebox.showwarning("Нет пути", "Сначала укажите выходной файл.")
             return
@@ -615,6 +683,7 @@ class PowerQueryExcelGUI(tk.Tk):
             "debug": "1" if self.var_debug.get() else "0",
             "no_cache": "1" if self.var_no_cache.get() else "0",
             "dump_m": "1" if self.var_dump_m.get() else "0",
+            "sqlite_all_banks": "1" if self.var_sqlite_all_banks.get() else "0",
         }
         save_settings(data)
 
