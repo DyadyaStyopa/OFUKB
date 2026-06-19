@@ -21,7 +21,10 @@ struct RunOptionsSection: View {
                         .onChangeCompat(of: appState.sqliteAllBanks) {
                             appState.toggleSQLiteAllBanks()
                         }
-                    EmptyView()
+                    Toggle("Заполнить XLSX из SQLite", isOn: $appState.fillFromSQLite)
+                        .onChangeCompat(of: appState.fillFromSQLite) {
+                            appState.toggleFillFromSQLite()
+                        }
                     EmptyView()
                 }
             }

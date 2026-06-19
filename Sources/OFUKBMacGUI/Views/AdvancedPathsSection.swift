@@ -15,6 +15,14 @@ struct AdvancedPathsSection: View {
                     action: appState.chooseCacheDir
                 )
                 PathField(
+                    title: "SQLite-база",
+                    value: appState.sqliteSource,
+                    placeholder: "База, собранная режимом SQLite по всем банкам",
+                    systemImage: "externaldrive.badge.person.crop",
+                    buttonTitle: "Выбрать",
+                    action: appState.chooseSQLiteSource
+                )
+                PathField(
                     title: "Файл лога",
                     value: appState.logFile,
                     placeholder: "По умолчанию рядом с книгой при verbose/debug",

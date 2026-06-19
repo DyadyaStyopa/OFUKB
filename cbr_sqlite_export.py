@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import hashlib
 import io
 import json
 import logging
+from multiprocessing import freeze_support
 import re
 import sqlite3
 import sys
@@ -58,6 +60,19 @@ class BankExportData:
     rows_written: int
 
 
+@dataclass(frozen=True)
+class PrefetchItem:
+    bank: BankRef
+    url: str
+
+
+@dataclass(frozen=True)
+class PrefetchResult:
+    item: PrefetchItem
+    status: str
+    bytes_count: int = 0
+
+
 def setup_logging(verbose: bool) -> logging.Logger:
     logger = logging.getLogger("cbr_sqlite_export")
     logger.handlers.clear()
@@ -69,6 +84,20 @@ def setup_logging(verbose: bool) -> logging.Logger:
     handler.setLevel(logging.DEBUG if verbose else logging.INFO)
     logger.addHandler(handler)
     return logger
+
+
+def cbr_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        ),
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+
+
+def html_cache_path(cache_dir: Path, url: str) -> Path:
+    return cache_dir / (hashlib.sha1(url.encode("utf-8")).hexdigest() + ".html")
 
 
 def parse_bank_refs_from_file(path: Path) -> List[BankRef]:
@@ -154,15 +183,7 @@ def discover_bank_refs_from_cbr(timeout: int, logger: logging.Logger) -> List[Ba
     """
     page_url = "https://www.cbr.ru/banking_sector/credit/FullCoList/"
     session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-            ),
-            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        }
-    )
+    session.headers.update(cbr_headers())
 
     logger.info("Запрашиваю страницу списка кредитных организаций ЦБ: %s", page_url)
     response = session.get(page_url, timeout=timeout)
@@ -200,6 +221,105 @@ def discover_bank_refs_from_cbr(timeout: int, logger: logging.Logger) -> List[Ba
         raise RuntimeError("Не удалось найти действующие банки на странице ЦБ. Передайте список через --regnums-file.")
     logger.info("Найдено действующих банков на странице ЦБ: %d", len(result))
     return result
+
+
+def extract_source_urls(m_code: str) -> List[str]:
+    urls: List[str] = []
+    seen = set()
+    for url in re.findall(r"Web\.(?:BrowserContents|Contents)\(\s*\"([^\"]+)\"\s*\)", m_code):
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def build_prefetch_items(base_m_code: str, banks: Sequence[BankRef], selected_queries: Optional[set]) -> List[PrefetchItem]:
+    items: List[PrefetchItem] = []
+    seen = set()
+    for bank in banks:
+        m_code = replace_regnum_in_m_code(base_m_code, bank.regnum)
+        if selected_queries:
+            engine = MiniMEngine(m_code, cache_dir=Path("."), use_cache=True, allow_network=False)
+            source_code = "\n".join(engine.queries[name] for name in selected_queries if name in engine.queries)
+        else:
+            source_code = m_code
+        for url in extract_source_urls(source_code):
+            key = (bank.regnum, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(PrefetchItem(bank=bank, url=url))
+    return items
+
+
+def prefetch_one(item: PrefetchItem, cache_dir: Path, timeout: int) -> PrefetchResult:
+    path = html_cache_path(cache_dir, item.url)
+    if path.exists():
+        return PrefetchResult(item=item, status="cached", bytes_count=path.stat().st_size)
+
+    session = requests.Session()
+    session.headers.update(cbr_headers())
+    response = session.get(item.url, timeout=timeout)
+    response.raise_for_status()
+    response.encoding = response.encoding or "utf-8"
+    html = response.text
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
+    return PrefetchResult(item=item, status="downloaded", bytes_count=len(html.encode("utf-8", errors="replace")))
+
+
+def prefetch_html_cache(
+    *,
+    base_m_code: str,
+    banks: Sequence[BankRef],
+    selected_queries: Optional[set],
+    cache_dir: Path,
+    workers: int,
+    timeout: int,
+    fail_fast: bool,
+    logger: logging.Logger,
+) -> Tuple[int, int, int]:
+    items = build_prefetch_items(base_m_code, banks, selected_queries)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Prefetch HTML: URL к проверке=%d, cache_dir=%s", len(items), cache_dir)
+    if not items:
+        return 0, 0, 0
+
+    downloaded = 0
+    cached = 0
+    failed = 0
+    worker_count = min(workers, len(items))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {executor.submit(prefetch_one, item, cache_dir, timeout): item for item in items}
+        for done_no, future in enumerate(as_completed(futures), start=1):
+            item = futures[future]
+            try:
+                result = future.result()
+                if result.status == "cached":
+                    cached += 1
+                else:
+                    downloaded += 1
+                logger.info(
+                    "prefetch [%d/%d] regnum=%s %s bytes=%d",
+                    done_no,
+                    len(items),
+                    item.bank.regnum,
+                    result.status,
+                    result.bytes_count,
+                )
+            except Exception as exc:
+                failed += 1
+                logger.error("prefetch [%d/%d] regnum=%s ошибка: %s", done_no, len(items), item.bank.regnum, exc)
+                logger.debug("URL: %s\n%s", item.url, traceback.format_exc())
+                if fail_fast:
+                    for pending in futures:
+                        pending.cancel()
+                    raise
+            finally:
+                time.sleep(0.02)
+    logger.info("Prefetch HTML завершен: скачано=%d, из кэша=%d, ошибок=%d", downloaded, cached, failed)
+    return downloaded, cached, failed
 
 
 def sqlite_table_name(query_name: str, used: Dict[str, str]) -> str:
@@ -335,6 +455,7 @@ def collect_bank_data(
     selected_queries: Optional[set],
     cache_dir: Path,
     use_cache: bool,
+    allow_network: bool,
     timeout: int,
     verbose: bool,
     logger: logging.Logger,
@@ -344,6 +465,7 @@ def collect_bank_data(
         m_code,
         cache_dir=cache_dir,
         use_cache=use_cache,
+        allow_network=allow_network,
         timeout=timeout,
         logger=logger,
         verbose=verbose,
@@ -369,6 +491,26 @@ def collect_bank_data(
     return BankExportData(bank=bank, frames=frames, query_count=query_count, rows_written=rows_written)
 
 
+def collect_bank_data_process(payload: Dict[str, object]) -> BankExportData:
+    logger = logging.getLogger("cbr_sqlite_export.worker")
+    logger.handlers.clear()
+    logger.addHandler(logging.NullHandler())
+    logger.setLevel(logging.CRITICAL)
+    return collect_bank_data(
+        bank=payload["bank"],
+        base_m_code=payload["base_m_code"],
+        loaded_queries=payload["loaded_queries"],
+        query_tables=payload["query_tables"],
+        selected_queries=payload["selected_queries"],
+        cache_dir=payload["cache_dir"],
+        use_cache=payload["use_cache"],
+        allow_network=payload["allow_network"],
+        timeout=payload["timeout"],
+        verbose=payload["verbose"],
+        logger=logger,
+    )
+
+
 def export_bank(
     *,
     conn: sqlite3.Connection,
@@ -379,6 +521,7 @@ def export_bank(
     selected_queries: Optional[set],
     cache_dir: Path,
     use_cache: bool,
+    allow_network: bool,
     timeout: int,
     verbose: bool,
     logger: logging.Logger,
@@ -392,6 +535,7 @@ def export_bank(
         selected_queries=selected_queries,
         cache_dir=cache_dir,
         use_cache=use_cache,
+        allow_network=allow_network,
         timeout=timeout,
         verbose=verbose,
         logger=logger,
@@ -467,6 +611,9 @@ def parse_args(argv: Optional[List[str]]) -> argparse.Namespace:
     parser.add_argument("--append", action="store_true", help="Дописать данные в существующий SQLite-файл")
     parser.add_argument("--cache-dir", type=Path, default=None, help="Папка HTML-кэша")
     parser.add_argument("--no-cache", action="store_true", help="Не использовать HTML-кэш")
+    parser.add_argument("--prefetch", action="store_true", help="Сначала параллельно скачать HTML в кэш, затем собрать SQLite из кэша")
+    parser.add_argument("--prefetch-only", action="store_true", help="Только скачать HTML в кэш и не создавать/обновлять SQLite")
+    parser.add_argument("--transform-only", action="store_true", help="Собирать SQLite только из HTML-кэша, без сетевых запросов")
     parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout в секундах")
     parser.add_argument("--workers", type=int, default=1, help="Количество параллельных загрузчиков банков. 1 = последовательный режим")
     parser.add_argument("--fail-fast", action="store_true", help="Остановиться на первой ошибке банка/запроса")
@@ -480,6 +627,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise SystemExit("Нельзя одновременно использовать --replace и --append.")
     if args.workers < 1:
         raise SystemExit("--workers должен быть не меньше 1.")
+    if args.no_cache and (args.prefetch or args.prefetch_only or args.transform_only):
+        raise SystemExit("--no-cache нельзя использовать вместе с --prefetch, --prefetch-only или --transform-only.")
+    if args.prefetch_only and args.transform_only:
+        raise SystemExit("Нельзя одновременно использовать --prefetch-only и --transform-only.")
 
     logger = setup_logging(args.verbose)
     xlsx_path = args.xlsx.resolve()
@@ -512,6 +663,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         if unknown:
             raise SystemExit(f"В книге нет таких загружаемых запросов: {', '.join(unknown)}")
 
+    if args.prefetch or args.prefetch_only:
+        downloaded, cached, failed = prefetch_html_cache(
+            base_m_code=base_m_code,
+            banks=banks,
+            selected_queries=selected_queries,
+            cache_dir=cache_dir,
+            workers=args.workers,
+            timeout=args.timeout,
+            fail_fast=args.fail_fast,
+            logger=logger,
+        )
+        if failed and args.prefetch_only:
+            print(f"Prefetch завершен с ошибками: скачано={downloaded}; из кэша={cached}; ошибок={failed}")
+            return 2
+        if args.prefetch_only:
+            print(f"Prefetch готов: {cache_dir}")
+            print(f"Скачано: {downloaded}; уже было в кэше: {cached}; ошибок: {failed}")
+            return 0
+
     used_tables: Dict[str, str] = {}
     query_tables = {item.query_name: sqlite_table_name(item.query_name, used_tables) for item in loaded_queries}
     if_exists = "append" if args.append else ("replace" if args.replace else "fail")
@@ -539,6 +709,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         selected_queries=selected_queries,
                         cache_dir=cache_dir,
                         use_cache=not args.no_cache,
+                        allow_network=not args.transform_only and not args.prefetch,
                         timeout=args.timeout,
                         verbose=args.verbose,
                         logger=logger,
@@ -560,56 +731,89 @@ def main(argv: Optional[List[str]] = None) -> int:
                 time.sleep(0.05)
         else:
             worker_count = min(args.workers, len(banks))
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = {}
-                for idx, bank in enumerate(banks, start=1):
-                    logger.info("[%d/%d] regnum=%s %s", idx, len(banks), bank.regnum, bank.name)
-                    mark_bank_started(conn, bank)
-                    future = executor.submit(
-                        collect_bank_data,
-                        bank=bank,
-                        base_m_code=base_m_code,
-                        loaded_queries=loaded_queries,
-                        query_tables=query_tables,
-                        selected_queries=selected_queries,
-                        cache_dir=cache_dir,
-                        use_cache=not args.no_cache,
-                        timeout=args.timeout,
-                        verbose=args.verbose,
-                        logger=logger,
-                    )
-                    futures[future] = bank
+            transform_offline = args.transform_only or args.prefetch
 
-                for done_no, future in enumerate(as_completed(futures), start=1):
-                    bank = futures[future]
-                    try:
-                        data = future.result()
-                        write_bank_data(conn, data, logger)
-                        ok_count += 1
-                        total_rows += data.rows_written
-                        logger.info(
-                            "[%d/%d] regnum=%s готов: запросов=%d строк=%d",
-                            done_no,
-                            len(banks),
-                            bank.regnum,
-                            data.query_count,
-                            data.rows_written,
-                        )
-                    except Exception as exc:
-                        failed_count += 1
-                        conn.execute(
-                            "UPDATE export_banks SET status='error', finished_at=?, error=? WHERE regnum=?",
-                            (sqlite_now(conn), str(exc), bank.regnum),
-                        )
-                        conn.commit()
-                        logger.error("[%d/%d] regnum=%s ошибка: %s", done_no, len(banks), bank.regnum, exc)
-                        logger.debug(traceback.format_exc())
-                        if args.fail_fast:
-                            for pending in futures:
-                                pending.cancel()
-                            raise
-                    finally:
-                        time.sleep(0.05)
+            def run_parallel(executor_class, process_mode: bool) -> None:
+                nonlocal ok_count, failed_count, total_rows
+                futures = {}
+                with executor_class(max_workers=worker_count) as executor:
+                    for idx, bank in enumerate(banks, start=1):
+                        logger.info("[%d/%d] regnum=%s %s", idx, len(banks), bank.regnum, bank.name)
+                        mark_bank_started(conn, bank)
+                        if process_mode:
+                            future = executor.submit(
+                                collect_bank_data_process,
+                                {
+                                    "bank": bank,
+                                    "base_m_code": base_m_code,
+                                    "loaded_queries": loaded_queries,
+                                    "query_tables": query_tables,
+                                    "selected_queries": selected_queries,
+                                    "cache_dir": cache_dir,
+                                    "use_cache": not args.no_cache,
+                                    "allow_network": False,
+                                    "timeout": args.timeout,
+                                    "verbose": args.verbose,
+                                },
+                            )
+                        else:
+                            future = executor.submit(
+                                collect_bank_data,
+                                bank=bank,
+                                base_m_code=base_m_code,
+                                loaded_queries=loaded_queries,
+                                query_tables=query_tables,
+                                selected_queries=selected_queries,
+                                cache_dir=cache_dir,
+                                use_cache=not args.no_cache,
+                                allow_network=not args.transform_only and not args.prefetch,
+                                timeout=args.timeout,
+                                verbose=args.verbose,
+                                logger=logger,
+                            )
+                        futures[future] = bank
+
+                    for done_no, future in enumerate(as_completed(futures), start=1):
+                        bank = futures[future]
+                        try:
+                            data = future.result()
+                            write_bank_data(conn, data, logger)
+                            ok_count += 1
+                            total_rows += data.rows_written
+                            logger.info(
+                                "[%d/%d] regnum=%s готов: запросов=%d строк=%d",
+                                done_no,
+                                len(banks),
+                                bank.regnum,
+                                data.query_count,
+                                data.rows_written,
+                            )
+                        except Exception as exc:
+                            failed_count += 1
+                            conn.execute(
+                                "UPDATE export_banks SET status='error', finished_at=?, error=? WHERE regnum=?",
+                                (sqlite_now(conn), str(exc), bank.regnum),
+                            )
+                            conn.commit()
+                            logger.error("[%d/%d] regnum=%s ошибка: %s", done_no, len(banks), bank.regnum, exc)
+                            logger.debug(traceback.format_exc())
+                            if args.fail_fast:
+                                for pending in futures:
+                                    pending.cancel()
+                                raise
+                        finally:
+                            time.sleep(0.05)
+
+            if transform_offline:
+                logger.info("Исполнитель transform: processes")
+                try:
+                    run_parallel(ProcessPoolExecutor, process_mode=True)
+                except PermissionError as exc:
+                    logger.warning("ProcessPool недоступен (%s), использую потоки", exc)
+                    run_parallel(ThreadPoolExecutor, process_mode=False)
+            else:
+                logger.info("Исполнитель transform: threads")
+                run_parallel(ThreadPoolExecutor, process_mode=False)
     finally:
         conn.close()
 
@@ -619,4 +823,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    freeze_support()
     raise SystemExit(main())

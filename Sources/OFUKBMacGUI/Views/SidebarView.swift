@@ -29,6 +29,13 @@ struct SidebarView: View {
                 .disabled(!appState.canRun)
 
                 Button {
+                    appState.run(transformOnly: true)
+                } label: {
+                    Label("Transform из кэша", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(!appState.canRunTransform)
+
+                Button {
                     appState.stop()
                 } label: {
                     Label("Остановить", systemImage: "stop.fill")

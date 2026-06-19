@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import sys
+from multiprocessing import freeze_support
 from typing import List, Optional
 
 
@@ -23,4 +24,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    freeze_support()
     raise SystemExit(main())

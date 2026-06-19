@@ -43,6 +43,7 @@ import logging
 import math
 import os
 import re
+import sqlite3
 import sys
 import time
 import traceback
@@ -413,12 +414,14 @@ class MiniMEngine:
         verbose: bool = False,
         debug: bool = False,
         debug_dir: Optional[Path] = None,
+        allow_network: bool = True,
     ):
         self.queries = self._split_queries(m_code)
         self.cache: Dict[str, pd.DataFrame] = {}
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.use_cache = use_cache
+        self.allow_network = allow_network
         self.timeout = timeout
         self.logger = logger or logging.getLogger("pq2py")
         self.verbose = verbose
@@ -437,8 +440,8 @@ class MiniMEngine:
             }
         )
         self.logger.debug(
-            "MiniMEngine initialized: queries=%d, cache_dir=%s, use_cache=%s, timeout=%s, debug_dir=%s",
-            len(self.queries), self.cache_dir, self.use_cache, self.timeout, self.debug_dir,
+            "MiniMEngine initialized: queries=%d, cache_dir=%s, use_cache=%s, allow_network=%s, timeout=%s, debug_dir=%s",
+            len(self.queries), self.cache_dir, self.use_cache, self.allow_network, self.timeout, self.debug_dir,
         )
 
     @staticmethod
@@ -738,6 +741,8 @@ class MiniMEngine:
             html = path.read_text(encoding="utf-8", errors="replace")
             self.logger.debug("HTML cache HIT: %s bytes=%d", path, len(html.encode("utf-8", errors="replace")))
             return html
+        if not self.allow_network:
+            raise FileNotFoundError(f"HTML нет в кэше, сетевые запросы запрещены: {url} ({path})")
         self.logger.info("HTML download: %s", url)
         response = self.session.get(url, timeout=self.timeout)
         self.logger.debug("HTTP response: status=%s encoding=%s url=%s", response.status_code, response.encoding, url)
@@ -1979,11 +1984,54 @@ def write_dataframe_to_excel_table(
     print("Проверка XML/ZIP XLSX пройдена")
 
 
+SQLITE_SERVICE_COLUMNS = {"regnum", "bank_name", "query_name", "collected_at", "row_number"}
+
+
+def load_results_from_sqlite(
+    db_path: Path,
+    loaded: List[LoadedQuery],
+    regnum: str,
+    logger: Optional[logging.Logger] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Читает результаты ранее собранной SQLite-базы для заполнения XLSX."""
+    logger = logger or logging.getLogger("pq2py")
+    if not db_path.exists():
+        raise FileNotFoundError(f"SQLite-файл не найден: {db_path}")
+
+    results: Dict[str, pd.DataFrame] = {}
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        table_rows = conn.execute("SELECT query_name, sqlite_table FROM export_queries").fetchall()
+        query_to_table = {str(row["query_name"]): str(row["sqlite_table"]) for row in table_rows}
+
+        for item in loaded:
+            table = query_to_table.get(item.query_name)
+            if not table:
+                raise KeyError(f"В SQLite нет таблицы для запроса {item.query_name!r}")
+
+            quoted_table = '"' + table.replace('"', '""') + '"'
+            count = conn.execute(f"SELECT COUNT(*) FROM {quoted_table} WHERE regnum = ?", (regnum,)).fetchone()[0]
+            if count == 0:
+                raise ValueError(f"В SQLite нет строк для regnum={regnum} query={item.query_name!r} table={table!r}")
+
+            df = pd.read_sql_query(
+                f"SELECT * FROM {quoted_table} WHERE regnum = ? ORDER BY row_number",
+                conn,
+                params=(regnum,),
+            )
+            df = df.drop(columns=[col for col in SQLITE_SERVICE_COLUMNS if col in df.columns], errors="ignore")
+            results[item.query_name] = df
+            logger.info("SQLite query loaded: %s table=%s rows=%d %s", item.query_name, table, len(df), df_debug_summary(df))
+    return results
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Выполнить Power Query этой книги на Python и заполнить те же Excel-таблицы.")
     parser.add_argument("xlsx", type=Path, help="Исходный .xlsx файл")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Куда сохранить заполненную копию")
     parser.add_argument("--regnum", type=str, default=None, help="Регистрационный номер банка ЦБ РФ, которым заменить regnum из M-кода")
+    parser.add_argument("--from-sqlite", type=Path, default=None, help="Заполнить XLSX данными из SQLite-базы вместо загрузки с сайта ЦБ")
+    parser.add_argument("--sqlite-regnum", type=str, default=None, help="regnum для выборки из SQLite. По умолчанию используется --regnum")
     parser.add_argument("--list", action="store_true", help="Только показать, какие запросы загружаются в какие таблицы")
     parser.add_argument("--dump-m", action="store_true", help="Сохранить извлечённый Section1.m рядом с файлом")
     parser.add_argument("--no-cache", action="store_true", help="Не использовать HTML-кэш")
@@ -1998,10 +2046,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.regnum = args.regnum.strip()
         if not re.fullmatch(r"\d+", args.regnum):
             parser.error("--regnum должен состоять только из цифр, например: --regnum 2673")
+    if args.sqlite_regnum is not None:
+        args.sqlite_regnum = args.sqlite_regnum.strip()
+        if not re.fullmatch(r"\d+", args.sqlite_regnum):
+            parser.error("--sqlite-regnum должен состоять только из цифр, например: --sqlite-regnum 2673")
+    if args.from_sqlite is not None and not (args.sqlite_regnum or args.regnum):
+        parser.error("для --from-sqlite нужно передать --sqlite-regnum или --regnum")
 
     xlsx_path = args.xlsx.resolve()
     if args.output is None:
-        suffix = f"_regnum_{args.regnum}_python_filled.xlsx" if args.regnum else "_python_filled.xlsx"
+        if args.from_sqlite is not None:
+            sqlite_regnum_for_name = args.sqlite_regnum or args.regnum
+            suffix = f"_regnum_{sqlite_regnum_for_name}_sqlite_filled.xlsx"
+        else:
+            suffix = f"_regnum_{args.regnum}_python_filled.xlsx" if args.regnum else "_python_filled.xlsx"
         output_path = xlsx_path.with_name(xlsx_path.stem + suffix)
     else:
         output_path = args.output.resolve()
@@ -2019,8 +2077,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         debug=args.debug,
     )
     logger.info("Старт скрипта")
-    logger.info("Аргументы: xlsx=%s output=%s regnum=%s list=%s dump_m=%s no_cache=%s cache_dir=%s verbose=%s debug=%s debug_dir=%s",
-                xlsx_path, output_path, args.regnum, args.list, args.dump_m, args.no_cache, cache_dir, args.verbose, args.debug, debug_dir)
+    logger.info("Аргументы: xlsx=%s output=%s regnum=%s from_sqlite=%s sqlite_regnum=%s list=%s dump_m=%s no_cache=%s cache_dir=%s verbose=%s debug=%s debug_dir=%s",
+                xlsx_path, output_path, args.regnum, args.from_sqlite, args.sqlite_regnum, args.list, args.dump_m, args.no_cache, cache_dir, args.verbose, args.debug, debug_dir)
     logger.info("Python: %s", sys.version.replace("\n", " "))
     logger.info("pandas=%s requests=%s openpyxl loaded", pd.__version__, requests.__version__)
 
@@ -2054,28 +2112,37 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"- {item.query_name} -> {item.sheet_name}!{item.table_ref} [{item.table_name}]")
         return 0
 
-    engine = MiniMEngine(
-        m_code,
-        cache_dir=cache_dir,
-        use_cache=not args.no_cache,
-        logger=logger,
-        verbose=args.verbose or args.debug,
-        debug=args.debug,
-        debug_dir=debug_dir,
-    )
     results: Dict[str, pd.DataFrame] = {}
     print(f"Найдено загружаемых таблиц: {len(loaded)}")
-    for item in loaded:
-        print(f"Выполняю {item.query_name} -> {item.sheet_name}!{item.table_ref} ...", flush=True)
-        try:
-            df = engine.evaluate_query(item.query_name)
-        except Exception:
-            logger.error("Ошибка при выполнении загружаемого запроса %s", item.query_name)
-            logger.error(traceback.format_exc())
-            raise
-        results[item.query_name] = df
-        logger.info("Загружаемый запрос готов: %s -> %s", item.query_name, df_debug_summary(df))
-        print(f"  строк: {len(df)}, столбцов: {len(df.columns)}")
+    if args.from_sqlite is not None:
+        sqlite_regnum = args.sqlite_regnum or args.regnum
+        print(f"Загружаю данные из SQLite: {args.from_sqlite.resolve()} regnum={sqlite_regnum}", flush=True)
+        results = load_results_from_sqlite(args.from_sqlite.resolve(), loaded, sqlite_regnum, logger=logger)
+        for item in loaded:
+            df = results.get(item.query_name)
+            if df is not None:
+                print(f"  {item.query_name}: строк: {len(df)}, столбцов: {len(df.columns)}")
+    else:
+        engine = MiniMEngine(
+            m_code,
+            cache_dir=cache_dir,
+            use_cache=not args.no_cache,
+            logger=logger,
+            verbose=args.verbose or args.debug,
+            debug=args.debug,
+            debug_dir=debug_dir,
+        )
+        for item in loaded:
+            print(f"Выполняю {item.query_name} -> {item.sheet_name}!{item.table_ref} ...", flush=True)
+            try:
+                df = engine.evaluate_query(item.query_name)
+            except Exception:
+                logger.error("Ошибка при выполнении загружаемого запроса %s", item.query_name)
+                logger.error(traceback.format_exc())
+                raise
+            results[item.query_name] = df
+            logger.info("Загружаемый запрос готов: %s -> %s", item.query_name, df_debug_summary(df))
+            print(f"  строк: {len(df)}, столбцов: {len(df.columns)}")
 
     final_output_path = output_path
     temp_output_path = output_path.with_name(f"{output_path.stem}.tmp{output_path.suffix or '.xlsx'}")

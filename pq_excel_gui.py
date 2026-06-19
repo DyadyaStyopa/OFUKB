@@ -117,6 +117,15 @@ def default_sqlite_output_path(xlsx_path: str) -> str:
     return str(p.with_name(p.stem + "_all_active_banks.sqlite"))
 
 
+def default_sqlite_filled_output_path(xlsx_path: str, regnum: str) -> str:
+    """Строит путь XLSX, заполненного из SQLite."""
+    if not xlsx_path:
+        return ""
+    p = Path(xlsx_path).expanduser()
+    suffix = f"_regnum_{regnum}_sqlite_filled.xlsx" if regnum else "_sqlite_filled.xlsx"
+    return str(p.with_name(p.stem + suffix))
+
+
 def open_path(path: Path) -> None:
     """Открывает файл/папку системным способом."""
     path = Path(path).expanduser().resolve()
@@ -218,6 +227,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.var_regnum = tk.StringVar(value=self.settings.get("regnum", ""))
         self.var_output = tk.StringVar(value="")
         self.var_cache_dir = tk.StringVar(value="")
+        self.var_sqlite_source = tk.StringVar(value="")
         self.var_log_file = tk.StringVar(value="")
         self.var_debug_dir = tk.StringVar(value="")
 
@@ -229,6 +239,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.var_dump_m = tk.BooleanVar(value=self.settings.get("dump_m", "0") == "1")
         self.var_list_only = tk.BooleanVar(value=False)
         self.var_sqlite_all_banks = tk.BooleanVar(value=self.settings.get("sqlite_all_banks", "0") == "1")
+        self.var_fill_from_sqlite = tk.BooleanVar(value=self.settings.get("fill_from_sqlite", "0") == "1")
 
         self._build_ui()
         self._bind_events()
@@ -271,14 +282,16 @@ class PowerQueryExcelGUI(tk.Tk):
         ttk.Checkbutton(options, text="Сохранить M-код (--dump-m)", variable=self.var_dump_m).grid(row=0, column=3, sticky="w")
         ttk.Checkbutton(options, text="Только список таблиц (--list)", variable=self.var_list_only).grid(row=0, column=4, sticky="w")
         ttk.Checkbutton(options, text="SQLite по всем действующим банкам", variable=self.var_sqlite_all_banks).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(options, text="Заполнить XLSX из SQLite", variable=self.var_fill_from_sqlite).grid(row=1, column=2, columnspan=2, sticky="w", pady=(8, 0))
 
         advanced = ttk.LabelFrame(top, text="Дополнительные пути", padding=10)
         advanced.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         advanced.columnconfigure(1, weight=1)
         self._add_path_row(advanced, 0, "Backend-скрипт:", self.var_backend, self.choose_backend, "Выбрать скрипт")
         self._add_path_row(advanced, 1, "Папка кэша:", self.var_cache_dir, self.choose_cache_dir, "Выбрать папку")
-        self._add_path_row(advanced, 2, "Файл лога:", self.var_log_file, self.choose_log_file, "Выбрать файл")
-        self._add_path_row(advanced, 3, "Debug-папка:", self.var_debug_dir, self.choose_debug_dir, "Выбрать папку")
+        self._add_path_row(advanced, 2, "SQLite-база:", self.var_sqlite_source, self.choose_sqlite_source, "Выбрать .sqlite")
+        self._add_path_row(advanced, 3, "Файл лога:", self.var_log_file, self.choose_log_file, "Выбрать файл")
+        self._add_path_row(advanced, 4, "Debug-папка:", self.var_debug_dir, self.choose_debug_dir, "Выбрать папку")
 
         command_frame = ttk.LabelFrame(self, text="Эквивалентная команда", padding=10)
         command_frame.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
@@ -296,21 +309,23 @@ class PowerQueryExcelGUI(tk.Tk):
 
         bottom = ttk.Frame(self, padding=(12, 0, 12, 12))
         bottom.grid(row=3, column=0, sticky="ew")
-        bottom.columnconfigure(4, weight=1)
+        bottom.columnconfigure(5, weight=1)
 
         self.btn_run = ttk.Button(bottom, text="Запустить", command=self.run_script)
         self.btn_run.grid(row=0, column=0, padx=(0, 8))
+        self.btn_transform = ttk.Button(bottom, text="Transform из HTML-кэша", command=self.run_transform_script)
+        self.btn_transform.grid(row=0, column=1, padx=(0, 8))
         self.btn_stop = ttk.Button(bottom, text="Остановить", command=self.stop_script, state="disabled")
-        self.btn_stop.grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(bottom, text="Очистить лог", command=self.clear_log).grid(row=0, column=2, padx=(0, 8))
-        ttk.Button(bottom, text="Сохранить лог из окна", command=self.save_visible_log).grid(row=0, column=3, padx=(0, 8))
+        self.btn_stop.grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(bottom, text="Очистить лог", command=self.clear_log).grid(row=0, column=3, padx=(0, 8))
+        ttk.Button(bottom, text="Сохранить лог из окна", command=self.save_visible_log).grid(row=0, column=4, padx=(0, 8))
 
         self.status = tk.StringVar(value="Готово к запуску")
-        ttk.Label(bottom, textvariable=self.status).grid(row=0, column=4, sticky="w", padx=(8, 8))
+        ttk.Label(bottom, textvariable=self.status).grid(row=0, column=5, sticky="w", padx=(8, 8))
         self.progress = ttk.Progressbar(bottom, mode="indeterminate", length=160)
-        self.progress.grid(row=0, column=5, padx=(0, 8))
-        ttk.Button(bottom, text="Открыть результат", command=self.open_output).grid(row=0, column=6, padx=(0, 8))
-        ttk.Button(bottom, text="Открыть папку", command=self.open_output_folder).grid(row=0, column=7)
+        self.progress.grid(row=0, column=6, padx=(0, 8))
+        ttk.Button(bottom, text="Открыть результат", command=self.open_output).grid(row=0, column=7, padx=(0, 8))
+        ttk.Button(bottom, text="Открыть папку", command=self.open_output_folder).grid(row=0, column=8)
 
         self.update_command_preview()
 
@@ -326,6 +341,7 @@ class PowerQueryExcelGUI(tk.Tk):
             self.var_xlsx,
             self.var_output,
             self.var_cache_dir,
+            self.var_sqlite_source,
             self.var_log_file,
             self.var_debug_dir,
         ]
@@ -335,6 +351,7 @@ class PowerQueryExcelGUI(tk.Tk):
         for var in [self.var_verbose, self.var_debug, self.var_no_cache, self.var_dump_m, self.var_list_only]:
             var.trace_add("write", lambda *_: self.update_command_preview())
         self.var_sqlite_all_banks.trace_add("write", lambda *_: self._on_mode_changed())
+        self.var_fill_from_sqlite.trace_add("write", lambda *_: self._on_mode_changed())
 
     def _on_regnum_changed(self) -> None:
         old_regnum = getattr(self, "_last_regnum", "")
@@ -342,7 +359,8 @@ class PowerQueryExcelGUI(tk.Tk):
         xlsx = self.var_xlsx.get().strip()
         output = self.var_output.get().strip()
         old_auto_output = default_output_path(xlsx, old_regnum) if xlsx else ""
-        if xlsx and (not output or output == old_auto_output):
+        old_sqlite_auto_output = default_sqlite_filled_output_path(xlsx, old_regnum) if xlsx else ""
+        if xlsx and (not output or output in {old_auto_output, old_sqlite_auto_output}):
             self.var_output.set(self.default_output_for_current_mode(xlsx, new_regnum))
         self._last_regnum = new_regnum
         self.update_command_preview()
@@ -353,7 +371,8 @@ class PowerQueryExcelGUI(tk.Tk):
         old_regnum = getattr(self, "_last_regnum", self.var_regnum.get().strip())
         excel_auto = default_output_path(xlsx, old_regnum) if xlsx else ""
         sqlite_auto = default_sqlite_output_path(xlsx) if xlsx else ""
-        if xlsx and (not output or output in {excel_auto, sqlite_auto}):
+        sqlite_filled_auto = default_sqlite_filled_output_path(xlsx, old_regnum) if xlsx else ""
+        if xlsx and (not output or output in {excel_auto, sqlite_auto, sqlite_filled_auto}):
             self.var_output.set(self.default_output_for_current_mode(xlsx, self.var_regnum.get().strip()))
         self.update_command_preview()
 
@@ -407,6 +426,16 @@ class PowerQueryExcelGUI(tk.Tk):
         if path:
             self.var_cache_dir.set(path)
 
+    def choose_sqlite_source(self) -> None:
+        initialdir = str(Path(self.var_xlsx.get()).expanduser().parent) if self.var_xlsx.get() else str(Path.home())
+        path = filedialog.askopenfilename(
+            title="Выберите SQLite-базу",
+            initialdir=initialdir,
+            filetypes=[("SQLite files", "*.sqlite *.db"), ("All files", "*.*")],
+        )
+        if path:
+            self.var_sqlite_source.set(path)
+
     def choose_log_file(self) -> None:
         path = filedialog.asksaveasfilename(
             title="Выберите файл лога",
@@ -425,16 +454,16 @@ class PowerQueryExcelGUI(tk.Tk):
     # Команда и валидация
     # ------------------------------------------------------------------
 
-    def build_backend_args(self) -> List[str]:
+    def build_backend_args(self, sqlite_phase: str = "prefetch_transform") -> List[str]:
         xlsx = self.var_xlsx.get().strip()
         if self.var_sqlite_all_banks.get():
-            args = [xlsx, "--all-banks", "--workers", "4"]
+            args = [xlsx, "--all-banks"]
+            args.append("--transform-only" if sqlite_phase == "transform" else "--prefetch")
+            args += ["--workers", "4"]
             output = self.var_output.get().strip()
             if output:
                 args += ["--output", output]
             args.append("--replace")
-            if self.var_no_cache.get():
-                args.append("--no-cache")
             if self.var_verbose.get():
                 args.append("--verbose")
             cache_dir = self.var_cache_dir.get().strip()
@@ -443,6 +472,20 @@ class PowerQueryExcelGUI(tk.Tk):
             return args
 
         args = [xlsx]
+
+        if self.var_fill_from_sqlite.get():
+            sqlite_source = self.var_sqlite_source.get().strip()
+            if sqlite_source:
+                args += ["--from-sqlite", sqlite_source]
+            regnum = self.var_regnum.get().strip()
+            if regnum:
+                args += ["--sqlite-regnum", regnum]
+            output = self.var_output.get().strip()
+            if output:
+                args += ["--output", output]
+            if self.var_verbose.get():
+                args.append("--verbose")
+            return args
 
         output = self.var_output.get().strip()
         if output and not self.var_list_only.get():
@@ -475,22 +518,36 @@ class PowerQueryExcelGUI(tk.Tk):
 
         return args
 
-    def build_display_command(self) -> List[str]:
+    def build_display_command(self, sqlite_phase: str = "prefetch_transform") -> List[str]:
         if self.var_sqlite_all_banks.get():
             script = str(resolve_sqlite_exporter_script() or SQLITE_EXPORTER_FILENAME)
         else:
             script = self.var_backend.get().strip() or BACKEND_FILENAME
-        return ["python3", script] + self.build_backend_args()
+        return ["python3", script] + self.build_backend_args(sqlite_phase)
 
-    def validate_inputs(self) -> bool:
+    def validate_inputs(self, sqlite_phase: str = "prefetch_transform") -> bool:
         backend = resolve_backend_script(self.var_backend.get())
         xlsx = Path(self.var_xlsx.get().strip()).expanduser()
         regnum = self.var_regnum.get().strip()
 
+        if sqlite_phase == "transform" and not self.var_sqlite_all_banks.get():
+            messagebox.showerror("Ошибка", "Transform из HTML-кэша доступен только в режиме SQLite по всем действующим банкам.")
+            return False
         if self.var_sqlite_all_banks.get():
             exporter = resolve_sqlite_exporter_script()
             if exporter is None:
                 messagebox.showerror("Ошибка", f"Не найден SQLite-экспортёр:\n{SQLITE_EXPORTER_FILENAME}\n\nПоложите GUI рядом с {SQLITE_EXPORTER_FILENAME}.")
+                return False
+        elif self.var_fill_from_sqlite.get():
+            sqlite_source = Path(self.var_sqlite_source.get().strip()).expanduser()
+            if not self.var_sqlite_source.get().strip():
+                messagebox.showerror("Ошибка", "Выберите SQLite-базу для заполнения XLSX.")
+                return False
+            if not sqlite_source.exists():
+                messagebox.showerror("Ошибка", f"SQLite-база не найдена:\n{sqlite_source}")
+                return False
+            if not regnum or not re.fullmatch(r"\d+", regnum):
+                messagebox.showerror("Ошибка", "Для заполнения из SQLite укажите regnum банка, например 1000 или 1481.")
                 return False
         elif backend is None:
             messagebox.showerror("Ошибка", f"Не найден backend-скрипт:\n{self.var_backend.get().strip() or BACKEND_FILENAME}\n\nПоложите GUI рядом с {BACKEND_FILENAME} или выберите скрипт вручную.")
@@ -519,6 +576,8 @@ class PowerQueryExcelGUI(tk.Tk):
     def default_output_for_current_mode(self, xlsx: str, regnum: str) -> str:
         if self.var_sqlite_all_banks.get():
             return default_sqlite_output_path(xlsx)
+        if self.var_fill_from_sqlite.get():
+            return default_sqlite_filled_output_path(xlsx, regnum)
         return default_output_path(xlsx, regnum)
 
     def copy_command(self) -> None:
@@ -531,17 +590,20 @@ class PowerQueryExcelGUI(tk.Tk):
     # Запуск процесса
     # ------------------------------------------------------------------
 
-    def run_script(self) -> None:
+    def run_transform_script(self) -> None:
+        self.run_script(sqlite_phase="transform")
+
+    def run_script(self, sqlite_phase: str = "prefetch_transform") -> None:
         if self.proc is not None:
             messagebox.showinfo("Уже выполняется", "Скрипт уже запущен.")
             return
-        if not self.validate_inputs():
+        if not self.validate_inputs(sqlite_phase):
             return
 
         self.save_current_settings()
         self.clear_log()
-        backend_args = self.build_backend_args()
-        self.append_log("Эквивалентная команда:\n" + quote_command(self.build_display_command()) + "\n\n")
+        backend_args = self.build_backend_args(sqlite_phase)
+        self.append_log("Эквивалентная команда:\n" + quote_command(self.build_display_command(sqlite_phase)) + "\n\n")
 
         backend = resolve_sqlite_exporter_script() if self.var_sqlite_all_banks.get() else resolve_backend_script(self.var_backend.get())
         if backend is None:
@@ -568,6 +630,7 @@ class PowerQueryExcelGUI(tk.Tk):
 
         self.start_time = time.time()
         self.btn_run.configure(state="disabled")
+        self.btn_transform.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.progress.start(12)
         self.status.set("Выполняется...")
@@ -602,6 +665,7 @@ class PowerQueryExcelGUI(tk.Tk):
         self.output_queue = None
         self.start_time = None
         self.btn_run.configure(state="normal")
+        self.btn_transform.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self.progress.stop()
 

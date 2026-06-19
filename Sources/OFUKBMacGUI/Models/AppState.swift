@@ -7,6 +7,7 @@ final class AppState: ObservableObject {
     @Published var outputPath = ""
     @Published var regnum = ""
     @Published var cacheDir = ""
+    @Published var sqliteSource = ""
     @Published var logFile = ""
     @Published var debugDir = ""
 
@@ -16,6 +17,7 @@ final class AppState: ObservableObject {
     @Published var dumpM = false
     @Published var listOnly = false
     @Published var sqliteAllBanks = false
+    @Published var fillFromSQLite = false
 
     @Published var logText = ""
     @Published var status = RunStatus.idle
@@ -28,6 +30,10 @@ final class AppState: ObservableObject {
 
     var canRun: Bool {
         !xlsxPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isRunning
+    }
+
+    var canRunTransform: Bool {
+        canRun && sqliteAllBanks
     }
 
     var statusText: String {
@@ -96,6 +102,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    func chooseSQLiteSource() {
+        let panel = NSOpenPanel()
+        panel.title = "Выберите SQLite-базу"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                self?.sqliteSource = url.path
+            }
+        }
+    }
+
     func chooseDebugDir() {
         chooseDirectory(title: "Выберите debug-папку") { [weak self] path in
             self?.debugDir = path
@@ -131,15 +151,30 @@ final class AppState: ObservableObject {
     }
 
     func toggleSQLiteAllBanks() {
+        if sqliteAllBanks {
+            fillFromSQLite = false
+        }
+        refreshOutputPath()
+    }
+
+    func toggleFillFromSQLite() {
+        if fillFromSQLite {
+            sqliteAllBanks = false
+        }
         if outputUsesAutoPath || outputPath.isEmpty {
             outputPath = defaultOutputPath()
             outputUsesAutoPath = true
         }
     }
 
-    func run() {
+    func run(transformOnly: Bool = false) {
         guard !isRunning else { return }
-        guard let command = activeCommand() else {
+        if transformOnly && !sqliteAllBanks {
+            appendLog("Transform из HTML-кэша доступен только для SQLite по всем действующим банкам.\n")
+            status = .failed(1)
+            return
+        }
+        guard let command = activeCommand(transformOnly: transformOnly) else {
             appendLog("Не найден \(activeScriptDisplayName). Положите скрипт рядом с приложением или в корень репозитория.\n")
             status = .failed(1)
             return
@@ -154,6 +189,24 @@ final class AppState: ObservableObject {
             appendLog("Excel-файл не найден: \(trimmedXLSX)\n")
             status = .failed(1)
             return
+        }
+        if fillFromSQLite {
+            let trimmedSQLite = sqliteSource.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedSQLite.isEmpty else {
+                appendLog("Выберите SQLite-базу для заполнения XLSX.\n")
+                status = .failed(1)
+                return
+            }
+            guard FileManager.default.fileExists(atPath: trimmedSQLite) else {
+                appendLog("SQLite-база не найдена: \(trimmedSQLite)\n")
+                status = .failed(1)
+                return
+            }
+            guard !regnum.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                appendLog("Укажите regnum для выборки из SQLite.\n")
+                status = .failed(1)
+                return
+            }
         }
 
         clearLog()
@@ -212,20 +265,32 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.open(folder)
     }
 
-    private func backendArguments() -> [String] {
+    private func backendArguments(transformOnly: Bool = false) -> [String] {
         if sqliteAllBanks {
-            var args: [String] = [xlsxPath, "--all-banks", "--workers", "4"]
+            var args: [String] = [xlsxPath, "--all-banks", transformOnly ? "--transform-only" : "--prefetch", "--workers", "4"]
             if !outputPath.isEmpty {
                 args += ["--output", outputPath]
             }
             args.append("--replace")
-            if noCache { args.append("--no-cache") }
             if verbose { args.append("--verbose") }
             if !cacheDir.isEmpty { args += ["--cache-dir", cacheDir] }
             return args
         }
 
         var args: [String] = [xlsxPath]
+        if fillFromSQLite {
+            if !sqliteSource.isEmpty {
+                args += ["--from-sqlite", sqliteSource]
+            }
+            if !regnum.isEmpty {
+                args += ["--sqlite-regnum", regnum]
+            }
+            if !outputPath.isEmpty {
+                args += ["--output", outputPath]
+            }
+            if verbose { args.append("--verbose") }
+            return args
+        }
         if !outputPath.isEmpty && !listOnly {
             args += ["--output", outputPath]
         }
@@ -249,6 +314,10 @@ final class AppState: ObservableObject {
         if sqliteAllBanks {
             return url.deletingPathExtension().path + "_all_active_banks.sqlite"
         }
+        if fillFromSQLite {
+            let suffix = regnum.isEmpty ? "_sqlite_filled.xlsx" : "_regnum_\(regnum)_sqlite_filled.xlsx"
+            return url.deletingPathExtension().path + suffix
+        }
         let suffix = regnum.isEmpty ? "_python_filled.xlsx" : "_regnum_\(regnum)_python_filled.xlsx"
         return url.deletingPathExtension().path + suffix
     }
@@ -262,9 +331,9 @@ final class AppState: ObservableObject {
         sqliteAllBanks ? BackendLocator.findSQLiteExporter() : BackendLocator.findBackend()
     }
 
-    private func activeCommand() -> RunnerCommand? {
+    private func activeCommand(transformOnly: Bool = false) -> RunnerCommand? {
         if let cli = BackendLocator.findBundledCLI() {
-            let args = [activeModeName] + backendArguments()
+            let args = [activeModeName] + backendArguments(transformOnly: transformOnly)
             return RunnerCommand(
                 executableURL: cli,
                 arguments: args,
@@ -273,7 +342,7 @@ final class AppState: ObservableObject {
         }
 
         guard let script = activeScriptURL() else { return nil }
-        let args = [script.path] + backendArguments()
+        let args = [script.path] + backendArguments(transformOnly: transformOnly)
         return RunnerCommand(
             executableURL: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["python3"] + args,
