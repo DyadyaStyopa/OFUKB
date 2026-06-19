@@ -46,11 +46,18 @@ final class AppState: ObservableObject {
     }
 
     var commandPreview: String {
-        (["python3", activeScriptDisplayName] + backendArguments()).quotedCommand
+        if let command = activeCommand() {
+            return command.displayCommand
+        }
+        return (["python3", activeScriptDisplayName] + backendArguments()).quotedCommand
     }
 
     private var activeScriptDisplayName: String {
         sqliteAllBanks ? BackendLocator.sqliteExporterDisplayName : BackendLocator.displayName
+    }
+
+    private var activeModeName: String {
+        sqliteAllBanks ? "sqlite" : "excel"
     }
 
     func chooseXLSX() {
@@ -132,7 +139,7 @@ final class AppState: ObservableObject {
 
     func run() {
         guard !isRunning else { return }
-        guard let backend = activeScriptURL() else {
+        guard let command = activeCommand() else {
             appendLog("Не найден \(activeScriptDisplayName). Положите скрипт рядом с приложением или в корень репозитория.\n")
             status = .failed(1)
             return
@@ -150,8 +157,7 @@ final class AppState: ObservableObject {
         }
 
         clearLog()
-        let args = [backend.path] + backendArguments()
-        appendLog("Команда:\n\(("python3 " + args.quotedCommand))\n\n")
+        appendLog("Команда:\n\(command.displayCommand)\n\n")
         status = .running
         isRunning = true
         lastExitCode = nil
@@ -160,7 +166,8 @@ final class AppState: ObservableObject {
         let newRunner = PythonRunner()
         runner = newRunner
         newRunner.run(
-            arguments: args,
+            executableURL: command.executableURL,
+            arguments: command.arguments,
             workingDirectory: workDir,
             output: { [weak self] text in
                 self?.appendLog(text)
@@ -255,6 +262,25 @@ final class AppState: ObservableObject {
         sqliteAllBanks ? BackendLocator.findSQLiteExporter() : BackendLocator.findBackend()
     }
 
+    private func activeCommand() -> RunnerCommand? {
+        if let cli = BackendLocator.findBundledCLI() {
+            let args = [activeModeName] + backendArguments()
+            return RunnerCommand(
+                executableURL: cli,
+                arguments: args,
+                displayCommand: ([cli.path] + args).quotedCommand
+            )
+        }
+
+        guard let script = activeScriptURL() else { return nil }
+        let args = [script.path] + backendArguments()
+        return RunnerCommand(
+            executableURL: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: ["python3"] + args,
+            displayCommand: (["python3"] + args).quotedCommand
+        )
+    }
+
     private func chooseDirectory(title: String, completion: @escaping (String) -> Void) {
         let panel = NSOpenPanel()
         panel.title = title
@@ -278,6 +304,12 @@ final class AppState: ObservableObject {
             appendLog("\(fallbackMessage): \(path)\n")
         }
     }
+}
+
+private struct RunnerCommand {
+    let executableURL: URL
+    let arguments: [String]
+    let displayCommand: String
 }
 
 enum RunStatus: Equatable {

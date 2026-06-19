@@ -6,6 +6,7 @@ final class PythonRunner {
     private var pipe: Pipe?
 
     func run(
+        executableURL: URL,
         arguments: [String],
         workingDirectory: URL,
         output: @escaping (String) -> Void,
@@ -14,8 +15,8 @@ final class PythonRunner {
         let process = Process()
         let pipe = Pipe()
 
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3"] + arguments
+        process.executableURL = executableURL
+        process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
         process.standardOutput = pipe
         process.standardError = pipe
@@ -46,7 +47,7 @@ final class PythonRunner {
             pipe.fileHandleForReading.readabilityHandler = nil
             self.process = nil
             self.pipe = nil
-            output("Не удалось запустить python3: \(error.localizedDescription)\n")
+            output("Не удалось запустить процесс: \(error.localizedDescription)\n")
             completion(1)
         }
     }
